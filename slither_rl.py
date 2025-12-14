@@ -41,10 +41,10 @@ class PolicyNetwork(nn.Module):
 class SlitherEnv(gym.Env):
     """Gym environment wrapper for Slither.io game."""
 
-    def __init__(self, driver, save_screenshots=False):
+    def __init__(self, driver, save_screenshots=False, record_video=False):
         super(SlitherEnv, self).__init__()
         self.controller = SlitherController(
-            driver=driver, save_screenshots=save_screenshots
+            driver=driver, save_screenshots=save_screenshots, record_video=record_video
         )
 
         # Action space: 8 discrete directions (0, 45, 90, 135, 180, 225, 270, 315 degrees)
@@ -55,13 +55,16 @@ class SlitherEnv(gym.Env):
         #   snake_length (normalized),
         #   nearest_food_distance (normalized),
         #   nearest_food_angle (normalized),
+        #   nearest_prey_distance (normalized),
+        #   nearest_prey_angle (normalized),
         #   nearest_enemy_distance (normalized),
         #   nearest_enemy_angle (normalized),
         #   num_nearby_foods,
+        #   num_nearby_preys,
         #   num_nearby_enemies
         # ]
         self.observation_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(8,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(11,), dtype=np.float32
         )
 
         self.previous_length = 0
@@ -74,10 +77,11 @@ class SlitherEnv(gym.Env):
 
         if not state or not state.get("snake"):
             # Return zero observation if game not ready
-            return np.zeros(8, dtype=np.float32)
+            return np.zeros(11, dtype=np.float32)
 
         snake = state["snake"]
         foods = state.get("foods", [])
+        preys = state.get("preys", [])
         enemies = state.get("other_snakes", [])
 
         # Current angle (normalized to [-1, 1])
@@ -95,6 +99,15 @@ class SlitherEnv(gym.Env):
             nearest_food_dist = 1.0
             nearest_food_angle = 0.0
 
+        # Nearest prey (high-value food from dead snakes)
+        if preys:
+            nearest_prey = preys[0]
+            nearest_prey_dist = np.tanh(nearest_prey["distance"] / 500.0)  # Normalize
+            nearest_prey_angle = nearest_prey["angle"] / np.pi
+        else:
+            nearest_prey_dist = 1.0
+            nearest_prey_angle = 0.0
+
         # Nearest enemy
         if enemies:
             nearest_enemy = enemies[0]
@@ -106,6 +119,7 @@ class SlitherEnv(gym.Env):
 
         # Counts (normalized)
         num_foods = min(len(foods), 50) / 50.0
+        num_preys = min(len(preys), 20) / 20.0
         num_enemies = min(len(enemies), 15) / 15.0
 
         obs = np.array(
@@ -114,9 +128,12 @@ class SlitherEnv(gym.Env):
                 snake_length,
                 nearest_food_dist,
                 nearest_food_angle,
+                nearest_prey_dist,
+                nearest_prey_angle,
                 nearest_enemy_dist,
                 nearest_enemy_angle,
                 num_foods,
+                num_preys,
                 num_enemies,
             ],
             dtype=np.float32,
@@ -128,14 +145,37 @@ class SlitherEnv(gym.Env):
         """Convert discrete action to angle in degrees."""
         return action * 45  # 0, 45, 90, 135, 180, 225, 270, 315
 
-    def step(self, action):
-        """Execute action and return next state, reward, done, info."""
+    def step(self, action, observation=None, probabilities=None):
+        """Execute action and return next state, reward, done, info.
+
+        Args:
+            action: Action to execute
+            observation: Optional observation for video annotation
+            probabilities: Optional action probabilities for video annotation
+        """
         # Convert action to angle and move
         angle = self._action_to_angle(action)
         self.controller.move_to_angle(angle)
 
-        # Small delay to let game update
-        time.sleep(0.25)
+        # Set annotation for the frame that was just captured
+        if observation is not None or probabilities is not None:
+            self.controller.set_frame_annotation(
+                observation=observation, probabilities=probabilities, action=action
+            )
+
+        # Small delay to let game update, capture frames during delay
+        # Capture frames more frequently to avoid missing gameplay
+        delay = 0.25
+        num_captures = 3  # Capture 3 frames during the delay
+        capture_interval = delay / num_captures
+
+        for i in range(num_captures):
+            time.sleep(capture_interval)
+            # Capture intermediate frames (without annotation, they'll use previous annotation)
+            if (
+                i < num_captures - 1
+            ):  # Don't capture on last iteration, we'll get obs next
+                self.controller.capture_frame_only()
 
         # Get new observation
         obs = self._get_obs()
@@ -173,6 +213,9 @@ class SlitherEnv(gym.Env):
 
     def reset(self):
         """Reset environment for new episode."""
+        # Note: Video creation is now handled in the training loop after each episode
+        # This prevents double-saving and ensures videos are saved even if reset() is called multiple times
+
         # If game is over, click play button
         if self.controller.is_game_over():
             try:
@@ -203,16 +246,27 @@ class REINFORCEAgent:
         self.saved_log_probs = []
         self.rewards = []
 
-    def select_action(self, state):
-        """Select action using current policy."""
-        state = torch.FloatTensor(state).unsqueeze(0)
-        probs = self.policy(state)
+    def select_action(self, state, return_probs=False):
+        """Select action using current policy.
+
+        Args:
+            state: Current state observation
+            return_probs: If True, also return action probabilities
+
+        Returns:
+            action (int): Selected action
+            probs (torch.Tensor, optional): Action probabilities if return_probs=True
+        """
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        probs = self.policy(state_tensor)
         m = Categorical(probs)
         action = m.sample()
 
         # Save log probability for training
         self.saved_log_probs.append(m.log_prob(action))
 
+        if return_probs:
+            return action.item(), probs.squeeze().detach().cpu().numpy()
         return action.item()
 
     def compute_returns(self, rewards):
@@ -279,7 +333,7 @@ class REINFORCEAgent:
         print(f"Model loaded from {filepath}")
 
 
-def train_agent(num_episodes=100):
+def train_agent(num_episodes=100, record_video=False):
     """Train the REINFORCE agent on Slither.io."""
     # Setup driver
     driver = webdriver.Chrome()
@@ -299,7 +353,7 @@ def train_agent(num_episodes=100):
     time.sleep(2)
 
     # Create environment and agent
-    env = SlitherEnv(driver, save_screenshots=False)
+    env = SlitherEnv(driver, save_screenshots=False, record_video=record_video)
     agent = REINFORCEAgent(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.n,
@@ -328,11 +382,13 @@ def train_agent(num_episodes=100):
 
         done = False
         while not done:
-            # Select action from policy
-            action = agent.select_action(state)
+            # Select action from policy (also get probabilities for annotation)
+            action, probs = agent.select_action(state, return_probs=True)
 
-            # Take step in environment
-            next_state, reward, done, info = env.step(action)
+            # Take step in environment (pass observation and probabilities for video annotation)
+            next_state, reward, done, info = env.step(
+                action, observation=state, probabilities=probs
+            )
 
             # Store reward
             agent.store_reward(reward)
@@ -346,6 +402,12 @@ def train_agent(num_episodes=100):
             # Limit episode length to prevent infinite loops
             if episode_length > 1000:
                 done = True
+
+        # Save video for this episode before resetting
+        if env.controller.record_video and env.controller.video_frames:
+            video_path = env.controller._create_video()
+            if video_path:
+                print(f"Episode {episode + 1} video saved to: {video_path}")
 
         # Update policy after episode ends
         loss = agent.update_policy()
@@ -384,7 +446,7 @@ def train_agent(num_episodes=100):
     return agent
 
 
-def load_and_play(model_path="models/best_model.pt", num_games=5):
+def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=False):
     """Load a trained model and play games with it."""
     # Setup driver
     driver = webdriver.Chrome()
@@ -404,7 +466,7 @@ def load_and_play(model_path="models/best_model.pt", num_games=5):
     time.sleep(2)
 
     # Create environment and agent
-    env = SlitherEnv(driver, save_screenshots=False)
+    env = SlitherEnv(driver, save_screenshots=False, record_video=record_video)
     agent = REINFORCEAgent(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.n,
@@ -422,9 +484,11 @@ def load_and_play(model_path="models/best_model.pt", num_games=5):
         done = False
 
         while not done:
-            # Select action using loaded policy
-            action = agent.select_action(state)
-            next_state, reward, done, info = env.step(action)
+            # Select action using loaded policy (also get probabilities for annotation)
+            action, probs = agent.select_action(state, return_probs=True)
+            next_state, reward, done, info = env.step(
+                action, observation=state, probabilities=probs
+            )
 
             game_length += 1
             max_length = max(max_length, info["length"])
@@ -437,13 +501,19 @@ def load_and_play(model_path="models/best_model.pt", num_games=5):
             f"Game {game + 1}/{num_games} | Steps: {game_length} | Max Length: {max_length}"
         )
 
+        # Save video for this game
+        if env.controller.record_video and env.controller.video_frames:
+            video_path = env.controller._create_video()
+            if video_path:
+                print(f"Game {game + 1} video saved to: {video_path}")
+
     driver.quit()
     print("Demo complete!")
 
 
 if __name__ == "__main__":
     # Train the agent
-    trained_agent = train_agent(num_episodes=50)
+    trained_agent = train_agent(num_episodes=50, record_video=False)
 
     # To load and play with a trained model instead, uncomment:
-    # load_and_play(model_path="models/best_model.pt", num_games=5)
+    # load_and_play(model_path="models/best_model.pt", num_games=1, record_video=True)

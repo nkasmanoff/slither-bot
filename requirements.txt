@@ -8,3 +8,4 @@ scikit-learn
 scikit-image
 torch
 gymnasium
+opencv-python

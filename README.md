@@ -25,12 +25,17 @@ The bot injects JavaScript to read game state variables (`window.snake`, `window
 
 **REINFORCE Algorithm:**
 
--   **State**: 8-dimensional observation (angle, length, nearest food/enemy distance & angle, counts)
+-   **State**: 11-dimensional observation (angle, length, nearest food/prey/enemy distance & angle, counts)
+    -   Current angle, snake length
+    -   Nearest food distance & angle
+    -   Nearest prey distance & angle (high-value food from dead snakes)
+    -   Nearest enemy distance & angle
+    -   Count of nearby foods, preys, and enemies
 -   **Actions**: 8 discrete directions (0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°)
 -   **Rewards**:
-    -   +10 per unit of length increase (food collection)
-    -   +0.1 per survival step
-    -   -10 for dying + 0.5 × final length
+    -   +10 per unit oxf length increase (food collection)
+    -   -2.5 per step (penalty for duration)
+    -   -50 for dying + 0.5 × final length
 -   **Training**: Online policy gradient using REINFORCE with baseline normalization
 -   **Network**: Simple 3-layer MLP with ReLU activations
 
@@ -97,12 +102,3 @@ Each frame in `game_log.json` contains:
 ## Visualization
 
 Use `visualize.ipynb` to overlay extracted game state on screenshots for validation.
-
-## Future Work
-
--   ✅ ~~Train an RL model using collected game states~~ (Implemented: REINFORCE policy gradient)
--   Add more sophisticated RL algorithms (PPO, A2C, DQN)
--   Improve danger detection (consider snake body segments, not just heads)
--   Add boosting strategy for chasing prey or escaping danger
--   Implement model saving/loading for trained policies
--   Add curriculum learning (start with easier scenarios)

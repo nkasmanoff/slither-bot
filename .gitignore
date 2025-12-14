@@ -1,3 +1,4 @@
 games/
 models/
 **.DS_Store
+**.pyc
