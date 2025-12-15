@@ -17,8 +17,8 @@ Typical workflow:
 
        python slither_human_pretrain.py \
            --data-dir human_trajectories \
-           --epochs 5 \
-           --batch-size 64 \
+           --epochs 20 \
+           --batch-size 16 \
            --output models/human_pretrained.pt
 
 3. Warm-start RL by pointing `slither_rl.train_agent` at the checkpoint

@@ -13,10 +13,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
-os.environ['DISPLAY'] = ':0'
+os.environ["DISPLAY"] = ":0"
 
 # Set to True if running on Raspberry Pi
-IS_RASPBERRY_PI = True
+IS_RASPBERRY_PI = False
+
 
 class SlitherController:
     def __init__(self, driver, save_screenshots=False, record_video=False):
@@ -635,6 +636,20 @@ class SlitherController:
                             }
                             
                             if (min_body_dist < 3000) {  // Only snakes within range
+                                // Collect all body segment positions
+                                var body_segments = [];
+                                if (s.pts && s.pts.length > 0) {
+                                    for (var k = 0; k < s.pts.length; k++) {
+                                        var seg = s.pts[k];
+                                        if (seg && seg.xx !== undefined && seg.yy !== undefined) {
+                                            body_segments.push({
+                                                x: seg.xx,
+                                                y: seg.yy
+                                            });
+                                        }
+                                    }
+                                }
+                                
                                 result.other_snakes.push({
                                     id: s.id,
                                     head_x: s.xx,
@@ -646,7 +661,8 @@ class SlitherController:
                                     length: s.sct || 0,
                                     distance: Math.round(min_body_dist),  // Distance to closest body part
                                     head_distance: Math.round(head_dist),  // Distance to head
-                                    angle_to: Math.atan2(closest_y - sy, closest_x - sx)  // Angle to closest part
+                                    angle_to: Math.atan2(closest_y - sy, closest_x - sx),  // Angle to closest part
+                                    body_segments: body_segments  // All body segment positions
                                 });
                             }
                         }
@@ -857,15 +873,15 @@ if __name__ == "__main__":
         # Raspberry Pi configuration with kiosk mode
         options = Options()
         options.binary_location = "/usr/bin/chromium-browser"
-        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-infobars')
-        service = Service('/usr/bin/chromedriver')
+        options.add_argument("--kiosk")  # Fullscreen with no navigation bar
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-infobars")
+        service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     else:
         # Standard Chrome driver
         driver = webdriver.Chrome()
-    
+
     driver.get("http://slither.io")
 
     # Wait for game to load and start
@@ -880,7 +896,7 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Create controller with screenshot saving and video recording enabled
-    controller = SlitherController(driver, save_screenshots=False, record_video=False)
+    controller = SlitherController(driver, save_screenshots=True, record_video=False)
 
     # Food-seeking policy with danger avoidance
     print("Starting food-seeking policy with danger avoidance...")
