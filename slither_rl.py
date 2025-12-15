@@ -20,7 +20,12 @@ import json
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from slither import SlitherController
+
+# Set to True if running on Raspberry Pi
+IS_RASPBERRY_PI = True
 
 
 STAGNATION_WINDOW_SIZE = 100
@@ -393,7 +398,19 @@ def setup_browser_and_game(record_video=False):
         env: SlitherEnv instance
     """
     # Setup driver
-    driver = webdriver.Chrome()
+    if IS_RASPBERRY_PI:
+        # Raspberry Pi configuration with kiosk mode
+        options = Options()
+        options.binary_location = "/usr/bin/chromium-browser"
+        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-infobars')
+        service = Service('/usr/bin/chromedriver')
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        # Standard Chrome driver
+        driver = webdriver.Chrome()
+    
     driver.get("http://slither.io")
 
     print("Waiting for game to load...")
@@ -724,7 +741,19 @@ def plot_training_metrics(metrics_path=None, save_path=None):
 def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=False):
     """Load a trained model and play games with it."""
     # Setup driver
-    driver = webdriver.Chrome()
+    if IS_RASPBERRY_PI:
+        # Raspberry Pi configuration with kiosk mode
+        options = Options()
+        options.binary_location = "/usr/bin/chromium-browser"
+        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-infobars')
+        service = Service('/usr/bin/chromedriver')
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        # Standard Chrome driver
+        driver = webdriver.Chrome()
+    
     driver.get("http://slither.io")
 
     print("Waiting for game to load...")

@@ -7,10 +7,16 @@ import io
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 import cv2
 import numpy as np
 from PIL import Image
 
+os.environ['DISPLAY'] = ':0'
+
+# Set to True if running on Raspberry Pi
+IS_RASPBERRY_PI = True
 
 class SlitherController:
     def __init__(self, driver, save_screenshots=False, record_video=False):
@@ -846,8 +852,20 @@ class SlitherController:
 
 # Example usage
 if __name__ == "__main__":
-    # Setup driver (assuming you already have this)
-    driver = webdriver.Chrome()
+    # Setup driver
+    if IS_RASPBERRY_PI:
+        # Raspberry Pi configuration with kiosk mode
+        options = Options()
+        options.binary_location = "/usr/bin/chromium-browser"
+        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-infobars')
+        service = Service('/usr/bin/chromedriver')
+        driver = webdriver.Chrome(service=service, options=options)
+    else:
+        # Standard Chrome driver
+        driver = webdriver.Chrome()
+    
     driver.get("http://slither.io")
 
     # Wait for game to load and start
@@ -862,7 +880,7 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Create controller with screenshot saving and video recording enabled
-    controller = SlitherController(driver, save_screenshots=True, record_video=True)
+    controller = SlitherController(driver, save_screenshots=False, record_video=False)
 
     # Food-seeking policy with danger avoidance
     print("Starting food-seeking policy with danger avoidance...")
