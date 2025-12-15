@@ -402,15 +402,15 @@ def setup_browser_and_game(record_video=False):
         # Raspberry Pi configuration with kiosk mode
         options = Options()
         options.binary_location = "/usr/bin/chromium-browser"
-        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-infobars')
-        service = Service('/usr/bin/chromedriver')
+        options.add_argument("--kiosk")  # Fullscreen with no navigation bar
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-infobars")
+        service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     else:
         # Standard Chrome driver
         driver = webdriver.Chrome()
-    
+
     driver.get("http://slither.io")
 
     print("Waiting for game to load...")
@@ -745,15 +745,15 @@ def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=F
         # Raspberry Pi configuration with kiosk mode
         options = Options()
         options.binary_location = "/usr/bin/chromium-browser"
-        options.add_argument('--kiosk')  # Fullscreen with no navigation bar
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-infobars')
-        service = Service('/usr/bin/chromedriver')
+        options.add_argument("--kiosk")  # Fullscreen with no navigation bar
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-infobars")
+        service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
     else:
         # Standard Chrome driver
         driver = webdriver.Chrome()
-    
+
     driver.get("http://slither.io")
 
     print("Waiting for game to load...")
@@ -833,7 +833,7 @@ if __name__ == "__main__":
     # Plot training metrics
     print("\nGenerating training plots...")
     plot_training_metrics(
-        metrics_path=metrics_path, save_path=None
+        metrics_path=metrics_path, save_path=metrics_path.replace(".json", ".png")
     )  # Set save_path to save instead of display
 
     # To load and play with a trained model instead, uncomment:
