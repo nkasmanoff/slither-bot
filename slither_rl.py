@@ -16,10 +16,21 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import time
 import os
+import json
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from slither import SlitherController
+
+
+STAGNATION_WINDOW_SIZE = 100
+STAGNATION_THRESHOLD_SIZE = 10
+
+device = (
+    "mps"
+    if torch.backends.mps.is_available()
+    else "cuda" if torch.cuda.is_available() else "cpu"
+)
 
 
 class PolicyNetwork(nn.Module):
@@ -61,10 +72,14 @@ class SlitherEnv(gym.Env):
         #   nearest_enemy_angle (normalized),
         #   num_nearby_foods,
         #   num_nearby_preys,
-        #   num_nearby_enemies
+        #   num_nearby_enemies,
+        #   food_quadrant_1_count (normalized),
+        #   food_quadrant_2_count (normalized),
+        #   food_quadrant_3_count (normalized),
+        #   food_quadrant_4_count (normalized),
         # ]
         self.observation_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(11,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(15,), dtype=np.float32
         )
 
         self.previous_length = 0
@@ -77,7 +92,7 @@ class SlitherEnv(gym.Env):
 
         if not state or not state.get("snake"):
             # Return zero observation if game not ready
-            return np.zeros(11, dtype=np.float32)
+            return np.zeros(15, dtype=np.float32)
 
         snake = state["snake"]
         foods = state.get("foods", [])
@@ -89,6 +104,10 @@ class SlitherEnv(gym.Env):
 
         # Snake length (log-normalized for better scale)
         snake_length = np.log(max(snake.get("length", 1), 1)) / 10.0
+
+        # Snake world position (used for quadrant-based food counts)
+        snake_x = snake.get("x", 0.0)
+        snake_y = snake.get("y", 0.0)
 
         # Nearest food
         if foods:
@@ -122,6 +141,35 @@ class SlitherEnv(gym.Env):
         num_preys = min(len(preys), 20) / 20.0
         num_enemies = min(len(enemies), 15) / 15.0
 
+        # Food distribution across 4 quadrants around the snake.
+        # Quadrants are defined in the (dx, dy) plane centered at the snake:
+        #   Q1: dx >= 0, dy >= 0
+        #   Q2: dx <  0, dy >= 0
+        #   Q3: dx <  0, dy <  0
+        #   Q4: dx >= 0, dy <  0
+        # Each count is normalized by the same 50-food cap used for num_foods.
+        quadrant_counts = [0, 0, 0, 0]
+        for f in foods:
+            fx = f.get("x")
+            fy = f.get("y")
+            if fx is None or fy is None:
+                continue
+            dx = fx - snake_x
+            dy = fy - snake_y
+            if dx >= 0 and dy >= 0:
+                quadrant_counts[0] += 1
+            elif dx < 0 and dy >= 0:
+                quadrant_counts[1] += 1
+            elif dx < 0 and dy < 0:
+                quadrant_counts[2] += 1
+            elif dx >= 0 and dy < 0:
+                quadrant_counts[3] += 1
+
+        max_foods = 50.0
+        food_quadrants = [
+            min(count, max_foods) / max_foods for count in quadrant_counts
+        ]
+
         obs = np.array(
             [
                 current_angle,
@@ -135,6 +183,10 @@ class SlitherEnv(gym.Env):
                 num_foods,
                 num_preys,
                 num_enemies,
+                food_quadrants[0],
+                food_quadrants[1],
+                food_quadrants[2],
+                food_quadrants[3],
             ],
             dtype=np.float32,
         )
@@ -333,8 +385,13 @@ class REINFORCEAgent:
         print(f"Model loaded from {filepath}")
 
 
-def train_agent(num_episodes=100, record_video=False):
-    """Train the REINFORCE agent on Slither.io."""
+def setup_browser_and_game(record_video=False):
+    """Set up browser and start a new game.
+
+    Returns:
+        driver: WebDriver instance
+        env: SlitherEnv instance
+    """
     # Setup driver
     driver = webdriver.Chrome()
     driver.get("http://slither.io")
@@ -342,7 +399,7 @@ def train_agent(num_episodes=100, record_video=False):
     print("Waiting for game to load...")
     time.sleep(5)
 
-    # Start first game
+    # Start game
     play_buttons = driver.find_elements(By.CLASS_NAME, "btnt")
     for button in play_buttons:
         if "Play" in button.text:
@@ -352,14 +409,42 @@ def train_agent(num_episodes=100, record_video=False):
     print("Game started!")
     time.sleep(2)
 
-    # Create environment and agent
+    # Create environment
     env = SlitherEnv(driver, save_screenshots=False, record_video=record_video)
+
+    return driver, env
+
+
+def train_agent(num_episodes=100, record_video=False, pretrained_model_path=None):
+    """Train the REINFORCE agent on Slither.io.
+
+    Args:
+        num_episodes: Number of training episodes.
+        record_video: Whether to record gameplay videos.
+        pretrained_model_path: Optional path to a model checkpoint created by
+            `slither_human_pretrain.py` (or another script) using the same
+            `PolicyNetwork` architecture. If provided, the policy and optimizer
+            weights are loaded before RL training begins.
+    """
+    # Setup initial browser and game
+    driver, env = setup_browser_and_game(record_video=record_video)
     agent = REINFORCEAgent(
         state_dim=env.observation_space.shape[0],
         action_dim=env.action_space.n,
         learning_rate=0.001,
         gamma=0.99,
     )
+
+    # Optionally warm-start from a pre-trained policy
+    if pretrained_model_path is not None and os.path.exists(pretrained_model_path):
+        print(
+            f"Loading pre-trained model from {pretrained_model_path} before RL training."
+        )
+        agent.load_model(pretrained_model_path)
+    elif pretrained_model_path is not None:
+        print(
+            f"Warning: pretrained_model_path '{pretrained_model_path}' not found; training from scratch."
+        )
 
     # Create models directory if it doesn't exist
     models_dir = "models"
@@ -368,6 +453,12 @@ def train_agent(num_episodes=100, record_video=False):
     # Track best performance
     best_length = 0
     best_reward = float("-inf")
+
+    # Track metrics for logging
+    episode_rewards = []
+    episode_lengths = []
+    episode_losses = []
+    episode_max_lengths = []
 
     print(f"Starting training for {num_episodes} episodes...")
     print(
@@ -379,6 +470,7 @@ def train_agent(num_episodes=100, record_video=False):
         episode_reward = 0
         episode_length = 0
         max_length = 0
+        recent_lengths = []  # Track lengths over last 5 steps
 
         done = False
         while not done:
@@ -395,9 +487,21 @@ def train_agent(num_episodes=100, record_video=False):
 
             episode_reward += reward
             episode_length += 1
-            max_length = max(max_length, info["length"])
+            current_length = info["length"]
+            max_length = max(max_length, current_length)
+
+            # Track recent lengths for stagnation check
+            recent_lengths.append(current_length)
+            if len(recent_lengths) > STAGNATION_WINDOW_SIZE:
+                recent_lengths.pop(0)  # Keep only last STAGNATION_WINDOW_SIZE steps
 
             state = next_state
+
+            # Check if length hasn't increased by more than STAGNATION_THRESHOLD_SIZE in last STAGNATION_WINDOW_SIZE steps
+            if len(recent_lengths) >= STAGNATION_WINDOW_SIZE:
+                length_increase = recent_lengths[-1] - recent_lengths[0]
+                if length_increase <= STAGNATION_THRESHOLD_SIZE:
+                    done = True
 
             # Limit episode length to prevent infinite loops
             if episode_length > 1000:
@@ -411,6 +515,12 @@ def train_agent(num_episodes=100, record_video=False):
 
         # Update policy after episode ends
         loss = agent.update_policy()
+
+        # Log metrics
+        episode_rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+        episode_losses.append(loss)
+        episode_max_lengths.append(max_length)
 
         print(
             f"Episode {episode + 1}/{num_episodes} | "
@@ -428,10 +538,35 @@ def train_agent(num_episodes=100, record_video=False):
             agent.save_model(model_path)
             print(f"🏆 New best model! Length: {best_length}")
 
+        # Quit browser and restart for next episode (unless it's the last episode)
+        if episode < num_episodes - 1:
+            print("Quitting browser and restarting for next episode...")
+            driver.quit()
+            driver, env = setup_browser_and_game(record_video=record_video)
+
     # Save final model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     final_model_path = os.path.join(models_dir, f"final_model_{timestamp}.pt")
     agent.save_model(final_model_path)
+
+    # Save training metrics to JSON file
+    metrics_data = {
+        "episode_rewards": episode_rewards,
+        "episode_lengths": episode_lengths,
+        "episode_losses": episode_losses,
+        "episode_max_lengths": episode_max_lengths,
+        "num_episodes": num_episodes,
+        "best_length": best_length,
+        "best_reward": best_reward,
+        "timestamp": timestamp,
+    }
+
+    metrics_dir = "training_logs"
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_path = os.path.join(metrics_dir, f"training_metrics_{timestamp}.json")
+
+    with open(metrics_path, "w") as f:
+        json.dump(metrics_data, f, indent=2)
 
     print("\n" + "=" * 50)
     print("Training complete!")
@@ -439,11 +574,151 @@ def train_agent(num_episodes=100, record_video=False):
     print(f"Best Model Reward: {best_reward:.2f}")
     print(f"Best model saved at: {os.path.join(models_dir, 'best_model.pt')}")
     print(f"Final model saved at: {final_model_path}")
+    print(f"Training metrics saved at: {metrics_path}")
     print("=" * 50)
 
     driver.quit()
 
-    return agent
+    return agent, metrics_path
+
+
+def plot_training_metrics(metrics_path=None, save_path=None):
+    """Plot training metrics from a saved JSON file.
+
+    Args:
+        metrics_path: Path to the metrics JSON file. If None, uses the most recent one.
+        save_path: Path to save the plot. If None, displays the plot.
+    """
+    import matplotlib.pyplot as plt
+
+    # Load metrics
+    if metrics_path is None:
+        # Find the most recent metrics file
+        metrics_dir = "training_logs"
+        if not os.path.exists(metrics_dir):
+            print(f"Error: {metrics_dir} directory not found. Run training first.")
+            return
+
+        metrics_files = [f for f in os.listdir(metrics_dir) if f.endswith(".json")]
+        if not metrics_files:
+            print(f"Error: No metrics files found in {metrics_dir}")
+            return
+
+        metrics_files.sort(reverse=True)
+        metrics_path = os.path.join(metrics_dir, metrics_files[0])
+        print(f"Using most recent metrics file: {metrics_path}")
+
+    with open(metrics_path, "r") as f:
+        metrics = json.load(f)
+
+    episode_rewards = metrics["episode_rewards"]
+    episode_lengths = metrics["episode_lengths"]
+    episode_losses = metrics["episode_losses"]
+    episode_max_lengths = metrics["episode_max_lengths"]
+    num_episodes = metrics["num_episodes"]
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    episodes = range(1, num_episodes + 1)
+
+    # Plot rewards
+    axes[0].plot(episodes, episode_rewards, alpha=0.6, linewidth=1)
+    axes[0].plot(episodes, episode_rewards, "o", markersize=3, alpha=0.4)
+    # Add moving average
+    if len(episode_rewards) > 10:
+        window = min(10, len(episode_rewards) // 5)
+        moving_avg = np.convolve(
+            episode_rewards, np.ones(window) / window, mode="valid"
+        )
+        axes[0].plot(
+            range(window, num_episodes + 1),
+            moving_avg,
+            "r-",
+            linewidth=2,
+            label=f"{window}-episode moving average",
+        )
+        axes[0].legend()
+    axes[0].set_xlabel("Episode")
+    axes[0].set_ylabel("Reward")
+    axes[0].set_title("Episode Reward Over Time")
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot episode lengths
+    axes[1].plot(episodes, episode_lengths, alpha=0.6, linewidth=1, color="green")
+    axes[1].plot(episodes, episode_lengths, "o", markersize=3, alpha=0.4, color="green")
+    # Add moving average
+    if len(episode_lengths) > 10:
+        window = min(10, len(episode_lengths) // 5)
+        moving_avg = np.convolve(
+            episode_lengths, np.ones(window) / window, mode="valid"
+        )
+        axes[1].plot(
+            range(window, num_episodes + 1),
+            moving_avg,
+            "r-",
+            linewidth=2,
+            label=f"{window}-episode moving average",
+        )
+        axes[1].legend()
+    axes[1].set_xlabel("Episode")
+    axes[1].set_ylabel("Episode Length (steps)")
+    axes[1].set_title("Episode Length Over Time")
+    axes[1].grid(True, alpha=0.3)
+
+    # Plot losses
+    axes[2].plot(episodes, episode_losses, alpha=0.6, linewidth=1, color="red")
+    axes[2].plot(episodes, episode_losses, "o", markersize=3, alpha=0.4, color="red")
+    # Add moving average
+    if len(episode_losses) > 10:
+        window = min(10, len(episode_losses) // 5)
+        moving_avg = np.convolve(episode_losses, np.ones(window) / window, mode="valid")
+        axes[2].plot(
+            range(window, num_episodes + 1),
+            moving_avg,
+            "b-",
+            linewidth=2,
+            label=f"{window}-episode moving average",
+        )
+        axes[2].legend()
+    axes[2].set_xlabel("Episode")
+    axes[2].set_ylabel("Loss")
+    axes[2].set_title("Policy Loss Over Time")
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"Plot saved to {save_path}")
+    else:
+        plt.show()
+
+    # Print summary statistics
+    print("\n" + "=" * 50)
+    print("Training Summary Statistics")
+    print("=" * 50)
+    print(f"Total Episodes: {num_episodes}")
+    print("\nReward Statistics:")
+    print(f"  Mean: {np.mean(episode_rewards):.2f}")
+    print(f"  Std: {np.std(episode_rewards):.2f}")
+    print(f"  Min: {np.min(episode_rewards):.2f}")
+    print(f"  Max: {np.max(episode_rewards):.2f}")
+    print("\nEpisode Length Statistics:")
+    print(f"  Mean: {np.mean(episode_lengths):.2f}")
+    print(f"  Std: {np.std(episode_lengths):.2f}")
+    print(f"  Min: {np.min(episode_lengths):.0f}")
+    print(f"  Max: {np.max(episode_lengths):.0f}")
+    print("\nLoss Statistics:")
+    print(f"  Mean: {np.mean(episode_losses):.4f}")
+    print(f"  Std: {np.std(episode_losses):.4f}")
+    print(f"  Min: {np.min(episode_losses):.4f}")
+    print(f"  Max: {np.max(episode_losses):.4f}")
+    print("\nMax Length Statistics:")
+    print(f"  Mean: {np.mean(episode_max_lengths):.2f}")
+    print(f"  Std: {np.std(episode_max_lengths):.2f}")
+    print(f"  Min: {np.min(episode_max_lengths):.0f}")
+    print(f"  Max: {np.max(episode_max_lengths):.0f}")
+    print("=" * 50)
 
 
 def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=False):
@@ -512,8 +787,25 @@ def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=F
 
 
 if __name__ == "__main__":
+    # Optional: warm-start from a pre-trained supervised model.
+    # If the environment variable SLITHER_PRETRAINED_MODEL is set to a valid
+    # checkpoint path, it will be loaded before RL training begins.
+
+    pretrained_model_path = os.path.join(
+        os.path.dirname(__file__), "models", "human_pretrained.pt"
+    )
     # Train the agent
-    trained_agent = train_agent(num_episodes=50, record_video=False)
+    trained_agent, metrics_path = train_agent(
+        num_episodes=50,
+        record_video=False,
+        pretrained_model_path=None,
+    )
+
+    # Plot training metrics
+    print("\nGenerating training plots...")
+    plot_training_metrics(
+        metrics_path=metrics_path, save_path=None
+    )  # Set save_path to save instead of display
 
     # To load and play with a trained model instead, uncomment:
     # load_and_play(model_path="models/best_model.pt", num_games=1, record_video=True)

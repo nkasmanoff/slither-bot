@@ -25,12 +25,13 @@ The bot injects JavaScript to read game state variables (`window.snake`, `window
 
 **REINFORCE Algorithm:**
 
--   **State**: 11-dimensional observation (angle, length, nearest food/prey/enemy distance & angle, counts)
+-   **State**: 15-dimensional observation (angle, length, nearest food/prey/enemy distance & angle, counts, and food quadrant distribution)
     -   Current angle, snake length
     -   Nearest food distance & angle
     -   Nearest prey distance & angle (high-value food from dead snakes)
     -   Nearest enemy distance & angle
     -   Count of nearby foods, preys, and enemies
+    -   Normalized food counts in each of 4 quadrants around the snake (Q1–Q4)
 -   **Actions**: 8 discrete directions (0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°)
 -   **Rewards**:
     -   +10 per unit oxf length increase (food collection)

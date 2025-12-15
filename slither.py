@@ -327,6 +327,10 @@ class SlitherController:
                 "Food Cnt",
                 "Prey Cnt",
                 "Enemy Cnt",
+                "Food Q1",
+                "Food Q2",
+                "Food Q3",
+                "Food Q4",
             ]
             cv2.putText(
                 annotated_frame,
