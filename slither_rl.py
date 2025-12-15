@@ -25,7 +25,7 @@ from selenium.webdriver.chrome.options import Options
 from slither import SlitherController
 
 # Set to True if running on Raspberry Pi
-IS_RASPBERRY_PI = True
+IS_RASPBERRY_PI = False
 
 
 STAGNATION_WINDOW_SIZE = 100
@@ -416,6 +416,13 @@ def setup_browser_and_game(record_video=False):
     print("Waiting for game to load...")
     time.sleep(5)
 
+    # Set game to low quality for better performance
+    try:
+        driver.find_element(By.ID, "grqi").click()
+        print("Set game to low quality")
+    except Exception:
+        pass  # Quality button may not be available
+
     # Start game
     play_buttons = driver.find_elements(By.CLASS_NAME, "btnt")
     for button in play_buttons:
@@ -758,6 +765,13 @@ def load_and_play(model_path="models/best_model.pt", num_games=5, record_video=F
 
     print("Waiting for game to load...")
     time.sleep(5)
+
+    # Set game to low quality for better performance
+    try:
+        driver.find_element(By.ID, "grqi").click()
+        print("Set game to low quality")
+    except Exception:
+        pass  # Quality button may not be available
 
     # Start first game
     play_buttons = driver.find_elements(By.CLASS_NAME, "btnt")

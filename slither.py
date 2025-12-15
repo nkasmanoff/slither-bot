@@ -886,6 +886,14 @@ if __name__ == "__main__":
 
     # Wait for game to load and start
     time.sleep(5)  # Adjust as needed, or use explicit waits
+
+    # Set game to low quality for better performance
+    try:
+        driver.find_element(By.ID, "grqi").click()
+        print("Set game to low quality")
+    except Exception:
+        pass  # Quality button may not be available
+
     # start the game
     play_button = driver.find_elements(By.CLASS_NAME, "btnt")
     for button in play_button:

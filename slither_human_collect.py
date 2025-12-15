@@ -193,6 +193,13 @@ def setup_browser_and_start_game():
     print("Waiting for game to load...")
     time.sleep(5)
 
+    # Set game to low quality for better performance
+    try:
+        driver.find_element(By.ID, "grqi").click()
+        print("Set game to low quality")
+    except Exception:
+        pass  # Quality button may not be available
+
     # Click the Play button to start the game
     play_buttons = driver.find_elements(By.CLASS_NAME, "btnt")
     for button in play_buttons:
