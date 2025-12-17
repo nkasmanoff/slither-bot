@@ -95,29 +95,40 @@ class SlitherEnv(gym.Env):
         reward = 0.0
 
         # Reward for eating food (growing)
-        reward += length_increase * 15.0
+        reward += length_increase * 10.0
 
-        # Time penalty to encourage efficiency
-        reward -= 5
+        # Small time penalty (reduced to not overwhelm danger signal)
+        reward -= 1.0
 
-        # Danger proximity penalty - provides denser signal for enemy avoidance
+        # Strong danger proximity penalty - key for learning to avoid enemies!
         enemies = full_state.get("other_snakes", []) if full_state else []
         if enemies:
             nearest_enemy_dist = enemies[0].get("distance", 1000)
             nearest_enemy_head_dist = enemies[0].get("head_distance", 1000)
             # Use the minimum of body and head distance for danger
             min_danger_dist = min(nearest_enemy_dist, nearest_enemy_head_dist)
-            if min_danger_dist < 100:  # Very close - high danger
+
+            if min_danger_dist < 75:  # Critical danger zone
+                reward -= 15.0
+            elif min_danger_dist < 150:  # High danger
+                reward -= 8.0
+            elif min_danger_dist < 250:  # Moderate danger
                 reward -= 3.0
-            elif min_danger_dist < 200:  # Moderately close
+            elif min_danger_dist < 400:  # Caution zone
                 reward -= 1.0
+
+        # Small reward for staying away from enemies (positive reinforcement)
+        if not enemies or (enemies and enemies[0].get("distance", 1000) > 500):
+            reward += 0.5  # Bonus for being in safe area
 
         self.previous_length = current_length
         self.steps += 1
 
         if done:
-            reward -= 50.0
-            reward += current_length * 0.5
+            # Strong death penalty - dying is very bad!
+            reward -= 100.0
+            # Small consolation for length achieved
+            reward += current_length * 0.25
 
         info = {
             "length": current_length,

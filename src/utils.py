@@ -15,8 +15,8 @@ from selenium.webdriver.chrome.options import Options
 # Environment configuration
 IS_RASPBERRY_PI = os.environ.get("SLITHER_RASPBERRY_PI", "false").lower() == "true"
 
-# Observation dimensions (17 features)
-OBSERVATION_DIM = 17
+# Observation dimensions (21 features for discrete action space)
+OBSERVATION_DIM = 21
 
 # Discrete action space: 12 directions at 30° intervals
 NUM_ACTIONS = 12
@@ -97,31 +97,32 @@ def wait_for_game_ready(controller, max_wait: float = 10.0) -> int:
 def extract_observation(state: dict | None) -> np.ndarray:
     """Extract observation vector from game state.
 
-    This uses a relative action space where all angles are relative to the
-    snake's current heading. This makes learning easier since the agent
-    just needs to learn "turn toward food, away from enemies".
+    Designed for discrete action space (12 absolute directions).
+    Uses ABSOLUTE angles so the agent can directly match angles to actions.
 
     Args:
         state: Detailed game state from SlitherController.get_detailed_state().
 
     Returns:
-        17-dimensional observation vector (dtype float32).
+        21-dimensional observation vector (dtype float32).
 
     Observation features:
-        0: snake_length - Log-normalized snake length
-        1: nearest_food_dist - Distance to nearest food (tanh-normalized)
-        2: relative_food_angle - Angle to food relative to heading [-1, 1]
-        3: nearest_prey_dist - Distance to nearest prey
-        4: relative_prey_angle - Angle to prey relative to heading [-1, 1]
-        5: nearest_enemy_dist - Distance to nearest enemy
-        6: relative_enemy_angle - Angle to enemy relative to heading [-1, 1]
-        7: num_foods - Normalized food count
-        8: num_preys - Normalized prey count
-        9: num_enemies - Normalized enemy count
-        10-13: food_quadrants - Food density in 4 quadrants (relative to heading)
-        14: food_efficiency - Weighted inverse-distance to nearby food
-        15: enemy_threat - Weighted inverse-distance to nearby enemies
-        16: nearest_enemy_head_dist - Distance to nearest enemy HEAD (collision danger)
+        0: current_angle - Snake's heading as discrete action index / NUM_ACTIONS
+        1: snake_length - Log-normalized snake length
+        2: nearest_food_dist - Distance to nearest food (tanh-normalized)
+        3: food_action - Which discrete action points toward food (normalized)
+        4: nearest_prey_dist - Distance to nearest prey
+        5: prey_action - Which discrete action points toward prey (normalized)
+        6: nearest_enemy_dist - Distance to nearest enemy body
+        7: enemy_action - Which discrete action points toward enemy (normalized)
+        8: nearest_enemy_head_dist - Distance to enemy head
+        9: num_foods - Normalized food count
+        10: num_preys - Normalized prey count
+        11: num_enemies - Normalized enemy count
+        12: food_efficiency - Weighted inverse-distance to nearby food
+        13: enemy_threat - Overall threat level from nearby enemies
+        14-17: danger_quadrant - Danger level in front/right/back/left
+        18-20: closest_enemy_in_front/right/left - Binary danger indicators
     """
     if not state or not state.get("snake"):
         return np.zeros(OBSERVATION_DIM, dtype=np.float32)
@@ -131,60 +132,50 @@ def extract_observation(state: dict | None) -> np.ndarray:
     preys = state.get("preys", [])
     enemies = state.get("other_snakes", [])
 
-    # Current angle in normalized form (used for relative calculations)
-    current_angle = snake.get("angle", 0) / np.pi
+    # Current angle as discrete action index (normalized to [0, 1])
+    snake_angle_rad = snake.get("angle", 0)
+    snake_angle_deg = np.degrees(snake_angle_rad) % 360.0
+    current_action = int(round(snake_angle_deg / ANGLE_PER_ACTION)) % NUM_ACTIONS
+    current_angle_norm = current_action / NUM_ACTIONS
 
     # Snake length (log-normalized)
     snake_length = np.log(max(snake.get("length", 1), 1)) / 10.0
 
-    # Snake world position
-    snake_x = snake.get("x", 0.0)
-    snake_y = snake.get("y", 0.0)
-
-    # Helper function to compute relative angle
-    def compute_relative_angle(absolute_angle_normalized):
-        """Convert absolute angle to relative angle (both in [-1, 1] range)."""
-        rel = absolute_angle_normalized - current_angle
-        # Wrap to [-1, 1] (equivalent to [-pi, pi])
-        while rel > 1.0:
-            rel -= 2.0
-        while rel < -1.0:
-            rel += 2.0
-        return rel
+    def angle_to_action_normalized(angle_rad):
+        """Convert angle in radians to normalized action index [0, 1]."""
+        angle_deg = np.degrees(angle_rad) % 360.0
+        action = int(round(angle_deg / ANGLE_PER_ACTION)) % NUM_ACTIONS
+        return action / NUM_ACTIONS
 
     # Nearest food
     if foods:
         nearest_food = foods[0]
         nearest_food_dist = np.tanh(nearest_food["distance"] / 500.0)
-        nearest_food_angle = nearest_food["angle"] / np.pi
-        relative_food_angle = compute_relative_angle(nearest_food_angle)
+        food_action = angle_to_action_normalized(nearest_food["angle"])
     else:
         nearest_food_dist = 1.0
-        relative_food_angle = 0.0
+        food_action = 0.0
 
     # Nearest prey (high-value food from dead snakes)
     if preys:
         nearest_prey = preys[0]
         nearest_prey_dist = np.tanh(nearest_prey["distance"] / 500.0)
-        nearest_prey_angle = nearest_prey["angle"] / np.pi
-        relative_prey_angle = compute_relative_angle(nearest_prey_angle)
+        prey_action = angle_to_action_normalized(nearest_prey["angle"])
     else:
         nearest_prey_dist = 1.0
-        relative_prey_angle = 0.0
+        prey_action = 0.0
 
-    # Nearest enemy (body or head)
+    # Nearest enemy (body)
     if enemies:
         nearest_enemy = enemies[0]
         nearest_enemy_dist = np.tanh(nearest_enemy["distance"] / 500.0)
-        nearest_enemy_angle = nearest_enemy["angle_to"] / np.pi
-        relative_enemy_angle = compute_relative_angle(nearest_enemy_angle)
-        # Head distance is important for collision avoidance
+        enemy_action = angle_to_action_normalized(nearest_enemy["angle_to"])
         nearest_enemy_head_dist = np.tanh(
             nearest_enemy.get("head_distance", 1000) / 500.0
         )
     else:
         nearest_enemy_dist = 1.0
-        relative_enemy_angle = 0.0
+        enemy_action = 0.0
         nearest_enemy_head_dist = 1.0
 
     # Counts (normalized)
@@ -192,66 +183,95 @@ def extract_observation(state: dict | None) -> np.ndarray:
     num_preys = min(len(preys), 20) / 20.0
     num_enemies = min(len(enemies), 15) / 15.0
 
-    # Food distribution across 4 quadrants (relative to snake heading)
-    # Quadrants are: front-right, front-left, back-left, back-right
-    snake_angle_rad = snake.get("angle", 0)
-    quadrant_counts = [0, 0, 0, 0]
-    for f in foods:
-        fx = f.get("x")
-        fy = f.get("y")
-        if fx is None or fy is None:
-            continue
-        dx = fx - snake_x
-        dy = fy - snake_y
-        # Rotate to snake's reference frame
-        cos_a = np.cos(-snake_angle_rad)
-        sin_a = np.sin(-snake_angle_rad)
-        rel_x = dx * cos_a - dy * sin_a  # Forward/backward
-        rel_y = dx * sin_a + dy * cos_a  # Left/right
-        if rel_x >= 0 and rel_y >= 0:
-            quadrant_counts[0] += 1  # Front-right
-        elif rel_x >= 0 and rel_y < 0:
-            quadrant_counts[1] += 1  # Front-left
-        elif rel_x < 0 and rel_y < 0:
-            quadrant_counts[2] += 1  # Back-left
-        elif rel_x < 0 and rel_y >= 0:
-            quadrant_counts[3] += 1  # Back-right
-
-    max_foods = 50.0
-    food_quadrants = [min(count, max_foods) / max_foods for count in quadrant_counts]
-
     # Food efficiency
     food_efficiency = 0.0
     for f in foods[:10]:
         food_efficiency += 1.0 / (f["distance"] + 50.0)
     food_efficiency = np.tanh(food_efficiency)
 
-    # Enemy threat
+    # Enemy threat (overall)
     enemy_threat = 0.0
     for e in enemies[:5]:
         dist_factor = 1.0 / (e["distance"] + 50.0)
         enemy_threat += dist_factor
     enemy_threat = np.tanh(enemy_threat)
 
+    # Directional danger: compute danger level in 4 quadrants relative to heading
+    # Front (±45°), Right (45°-135°), Back (135°-225°), Left (225°-315°)
+    danger_quadrants = [0.0, 0.0, 0.0, 0.0]  # front, right, back, left
+    DANGER_RADIUS = 300  # Consider enemies within this distance
+
+    for e in enemies:
+        dist = e.get("distance", 1000)
+        if dist > DANGER_RADIUS:
+            continue
+
+        # Compute relative angle to enemy
+        enemy_angle_rad = e.get("angle_to", 0)
+        relative_angle = (enemy_angle_rad - snake_angle_rad) % (2 * np.pi)
+        relative_angle_deg = np.degrees(relative_angle)
+
+        # Danger contribution (closer = more dangerous)
+        danger = 1.0 - (dist / DANGER_RADIUS)
+
+        # Assign to quadrant
+        if relative_angle_deg < 45 or relative_angle_deg >= 315:
+            danger_quadrants[0] += danger  # Front
+        elif 45 <= relative_angle_deg < 135:
+            danger_quadrants[1] += danger  # Right
+        elif 135 <= relative_angle_deg < 225:
+            danger_quadrants[2] += danger  # Back
+        else:
+            danger_quadrants[3] += danger  # Left
+
+    # Normalize danger quadrants
+    danger_quadrants = [min(d, 1.0) for d in danger_quadrants]
+
+    # Binary danger indicators for immediate collision avoidance
+    IMMEDIATE_DANGER_DIST = 150
+    danger_front = 0.0
+    danger_right = 0.0
+    danger_left = 0.0
+
+    for e in enemies:
+        dist = e.get("distance", 1000)
+        if dist > IMMEDIATE_DANGER_DIST:
+            continue
+
+        enemy_angle_rad = e.get("angle_to", 0)
+        relative_angle = (enemy_angle_rad - snake_angle_rad) % (2 * np.pi)
+        relative_angle_deg = np.degrees(relative_angle)
+
+        if relative_angle_deg < 60 or relative_angle_deg >= 300:
+            danger_front = 1.0
+        elif 60 <= relative_angle_deg < 150:
+            danger_right = 1.0
+        elif 210 <= relative_angle_deg < 300:
+            danger_left = 1.0
+
     return np.array(
         [
+            current_angle_norm,
             snake_length,
             nearest_food_dist,
-            relative_food_angle,
+            food_action,
             nearest_prey_dist,
-            relative_prey_angle,
+            prey_action,
             nearest_enemy_dist,
-            relative_enemy_angle,
+            enemy_action,
+            nearest_enemy_head_dist,
             num_foods,
             num_preys,
             num_enemies,
-            food_quadrants[0],
-            food_quadrants[1],
-            food_quadrants[2],
-            food_quadrants[3],
             food_efficiency,
             enemy_threat,
-            nearest_enemy_head_dist,
+            danger_quadrants[0],  # front
+            danger_quadrants[1],  # right
+            danger_quadrants[2],  # back
+            danger_quadrants[3],  # left
+            danger_front,
+            danger_right,
+            danger_left,
         ],
         dtype=np.float32,
     )
