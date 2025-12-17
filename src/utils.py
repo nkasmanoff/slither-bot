@@ -15,12 +15,12 @@ from selenium.webdriver.chrome.options import Options
 # Environment configuration
 IS_RASPBERRY_PI = os.environ.get("SLITHER_RASPBERRY_PI", "false").lower() == "true"
 
-# Observation dimensions (17 features with relative action space)
+# Observation dimensions (17 features)
 OBSERVATION_DIM = 17
-ACTION_DIM = 1
 
-# Maximum turn rate per step (in radians) - about 45 degrees
-MAX_TURN_RATE = np.pi / 4
+# Discrete action space: 12 directions at 30° intervals
+NUM_ACTIONS = 12
+ANGLE_PER_ACTION = 360.0 / NUM_ACTIONS  # 30 degrees
 
 
 def setup_browser(headless: bool = False) -> webdriver.Chrome:
@@ -257,64 +257,44 @@ def extract_observation(state: dict | None) -> np.ndarray:
     )
 
 
-def angle_to_continuous_action(angle_rad: float) -> float:
-    """Convert snake angle (radians) to continuous action in [-1, 1].
+def discrete_action_to_angle(action: int) -> float:
+    """Convert discrete action index to angle in degrees.
 
     Args:
-        angle_rad: Snake heading angle in radians.
+        action: Discrete action index (0 to NUM_ACTIONS-1).
 
     Returns:
-        Continuous action in [-1, 1].
+        Angle in degrees [0, 360).
+    """
+    return float(action * ANGLE_PER_ACTION)
+
+
+def angle_to_discrete_action(angle_deg: float) -> int:
+    """Convert angle in degrees to nearest discrete action index.
+
+    Args:
+        angle_deg: Angle in degrees.
+
+    Returns:
+        Discrete action index (0 to NUM_ACTIONS-1).
+    """
+    # Normalize to [0, 360)
+    angle_deg = float(angle_deg) % 360.0
+    # Round to nearest action
+    action = int(round(angle_deg / ANGLE_PER_ACTION)) % NUM_ACTIONS
+    return action
+
+
+def angle_rad_to_discrete_action(angle_rad: float) -> int:
+    """Convert angle in radians to nearest discrete action index.
+
+    Args:
+        angle_rad: Angle in radians.
+
+    Returns:
+        Discrete action index (0 to NUM_ACTIONS-1).
     """
     if angle_rad is None:
-        return 0.0
-
-    angle_rad = float(angle_rad) % (2.0 * np.pi)
-    return float(angle_rad / np.pi - 1.0)
-
-
-def continuous_action_to_turn(action: float) -> float:
-    """Convert continuous action [-1, 1] to turn delta in radians.
-
-    The action represents a relative turn:
-    - action = -1: turn right (clockwise) by MAX_TURN_RATE
-    - action = 0: go straight
-    - action = +1: turn left (counter-clockwise) by MAX_TURN_RATE
-
-    Args:
-        action: Continuous value in [-1, 1].
-
-    Returns:
-        Turn delta in radians [-MAX_TURN_RATE, +MAX_TURN_RATE].
-    """
-    return float(action) * MAX_TURN_RATE
-
-
-def apply_turn_to_angle(current_angle_rad: float, turn_delta: float) -> float:
-    """Apply a turn delta to get new absolute angle in degrees.
-
-    Args:
-        current_angle_rad: Current heading in radians.
-        turn_delta: Turn amount in radians (positive = CCW, negative = CW).
-
-    Returns:
-        New angle in degrees [0, 360].
-    """
-    new_angle_rad = current_angle_rad + turn_delta
-    new_angle_deg = np.degrees(new_angle_rad) % 360
-    return float(new_angle_deg)
-
-
-def continuous_action_to_angle(action: float) -> float:
-    """Convert continuous action [-1, 1] to angle in degrees [0, 360].
-
-    DEPRECATED: Use continuous_action_to_turn() for relative actions.
-    Kept for backward compatibility with trajectory data.
-
-    Args:
-        action: Continuous value in [-1, 1].
-
-    Returns:
-        Angle in degrees [0, 360].
-    """
-    return (action + 1.0) * 180.0
+        return 0
+    angle_deg = np.degrees(angle_rad) % 360.0
+    return angle_to_discrete_action(angle_deg)

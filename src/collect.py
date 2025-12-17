@@ -13,41 +13,13 @@ import numpy as np
 
 from .controller import SlitherController
 from .utils import (
-    MAX_TURN_RATE,
+    NUM_ACTIONS,
     OBSERVATION_DIM,
+    angle_rad_to_discrete_action,
     extract_observation,
     setup_browser,
     start_game,
 )
-
-
-def compute_relative_turn_action(current_angle_rad, prev_angle_rad):
-    """Compute the relative turn action from angle change.
-
-    Maps the actual turn taken to a continuous action in [-1, 1].
-
-    Args:
-        current_angle_rad: Current snake angle in radians.
-        prev_angle_rad: Previous snake angle in radians.
-
-    Returns:
-        Continuous action in [-1, 1] representing the relative turn.
-    """
-    if current_angle_rad is None or prev_angle_rad is None:
-        return 0.0
-
-    # Compute angle difference (turn delta)
-    delta = current_angle_rad - prev_angle_rad
-
-    # Normalize to [-pi, pi]
-    while delta > np.pi:
-        delta -= 2 * np.pi
-    while delta < -np.pi:
-        delta += 2 * np.pi
-
-    # Clamp to max turn rate and normalize to [-1, 1]
-    action = np.clip(delta / MAX_TURN_RATE, -1.0, 1.0)
-    return float(action)
 
 
 def collect_single_episode(
@@ -55,8 +27,8 @@ def collect_single_episode(
 ):
     """Collect one human-played episode and save it to JSON.
 
-    Records relative turn actions (not absolute angles) to match
-    the relative action space used during RL training.
+    Records discrete actions (0 to NUM_ACTIONS-1) representing the
+    direction the human is moving at each timestep.
 
     Args:
         output_dir: Directory where episode JSON will be saved.
@@ -76,7 +48,6 @@ def collect_single_episode(
     start_time = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     prev_length = controller.get_snake_length()
-    prev_angle_rad = None  # Track previous angle for relative turn computation
     steps = []
     step_idx = 0
 
@@ -91,9 +62,8 @@ def collect_single_episode(
             if state and state.get("snake") is not None:
                 snake_angle = state["snake"].get("angle")
                 if snake_angle is not None:
-                    # Compute relative turn action (not absolute angle)
-                    action = compute_relative_turn_action(snake_angle, prev_angle_rad)
-                    prev_angle_rad = snake_angle
+                    # Convert angle to discrete action index
+                    action = angle_rad_to_discrete_action(snake_angle)
 
             current_length = controller.get_snake_length()
             length_increase = current_length - prev_length
@@ -152,7 +122,7 @@ def collect_single_episode(
             "final_length": final_length,
             "duration_seconds": round(duration, 3),
             "observation_dim": OBSERVATION_DIM,
-            "action_dim": 1,
+            "num_actions": NUM_ACTIONS,
         },
         "steps": steps,
     }

@@ -15,15 +15,15 @@ from selenium.webdriver.common.by import By
 from .agents import A2CAgent, REINFORCEAgent
 from .controller import SlitherController
 from .utils import (
+    NUM_ACTIONS,
     OBSERVATION_DIM,
-    apply_turn_to_angle,
-    continuous_action_to_turn,
+    discrete_action_to_angle,
     extract_observation,
     setup_browser,
     start_game,
 )
 
-STAGNATION_WINDOW_SIZE = 100
+STAGNATION_WINDOW_SIZE = 500
 STAGNATION_THRESHOLD_SIZE = 10
 
 
@@ -44,9 +44,8 @@ class SlitherEnv(gym.Env):
         super().__init__()
         self.controller = SlitherController(driver, save_screenshots, record_video)
         self.action_delay = action_delay
-        self.action_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(1,), dtype=np.float32
-        )
+        # Discrete action space: 12 directions at 30° intervals
+        self.action_space = gym.spaces.Discrete(NUM_ACTIONS)
         self.observation_space = gym.spaces.Box(
             low=-1.0, high=1.0, shape=(OBSERVATION_DIM,), dtype=np.float32
         )
@@ -63,22 +62,13 @@ class SlitherEnv(gym.Env):
     def step(self, action, observation=None, probabilities=None):
         """Execute action and return next state, reward, done, info.
 
-        The action is a relative turn in [-1, 1]:
-        - action = -1: turn right (clockwise) by MAX_TURN_RATE
-        - action = 0: go straight
-        - action = +1: turn left (counter-clockwise) by MAX_TURN_RATE
+        The action is a discrete index (0 to NUM_ACTIONS-1) representing
+        absolute directions at 30° intervals:
+        - action 0 = 0°, action 1 = 30°, ..., action 11 = 330°
         """
-        # Get current snake angle before moving
-        pre_state = self.controller.get_detailed_state()
-        if pre_state and pre_state.get("snake"):
-            current_angle_rad = pre_state["snake"].get("angle", 0)
-        else:
-            current_angle_rad = 0
-
-        # Convert relative action to turn delta, then to new absolute angle
-        turn_delta = continuous_action_to_turn(action)
-        new_angle_deg = apply_turn_to_angle(current_angle_rad, turn_delta)
-        self.controller.move_to_angle(new_angle_deg)
+        # Convert discrete action to angle in degrees
+        angle_deg = discrete_action_to_angle(action)
+        self.controller.move_to_angle(angle_deg)
 
         if observation is not None or probabilities is not None:
             self.controller.set_frame_annotation(

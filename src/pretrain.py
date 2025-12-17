@@ -26,40 +26,12 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from .agents import PolicyNetwork
 from .controller import SlitherController
 from .utils import (
-    MAX_TURN_RATE,
+    NUM_ACTIONS,
+    angle_to_discrete_action,
     extract_observation,
     setup_browser,
     wait_for_game_ready,
 )
-
-
-def compute_target_turn_action(current_angle_rad, target_angle_rad):
-    """Compute the relative turn action to reach a target angle.
-
-    Used by rules-based policy to generate training targets.
-
-    Args:
-        current_angle_rad: Current snake angle in radians.
-        target_angle_rad: Target angle in radians.
-
-    Returns:
-        Continuous action in [-1, 1] representing the relative turn.
-    """
-    if current_angle_rad is None or target_angle_rad is None:
-        return 0.0
-
-    # Compute angle difference needed
-    delta = target_angle_rad - current_angle_rad
-
-    # Normalize to [-pi, pi]
-    while delta > np.pi:
-        delta -= 2 * np.pi
-    while delta < -np.pi:
-        delta += 2 * np.pi
-
-    # Clamp to max turn rate and normalize to [-1, 1]
-    action = np.clip(delta / MAX_TURN_RATE, -1.0, 1.0)
-    return float(action)
 
 
 DANGER_DISTANCE = 300
@@ -67,11 +39,14 @@ SAFE_DISTANCE = 500
 
 
 class TrajectoryDataset(Dataset):
-    """Dataset over (observation, action) pairs from trajectory episodes."""
+    """Dataset over (observation, action) pairs from trajectory episodes.
+
+    Actions are discrete indices (0 to NUM_ACTIONS-1).
+    """
 
     def __init__(self, data_dir: str, max_files: int | None = None):
         self.observations: List[List[float]] = []
-        self.actions: List[float] = []
+        self.actions: List[int] = []
 
         pattern = os.path.join(data_dir, "*.json")
         all_paths = sorted(glob.glob(pattern))
@@ -95,7 +70,8 @@ class TrajectoryDataset(Dataset):
                     continue
 
                 self.observations.append(obs)
-                self.actions.append(float(action))
+                # Ensure action is an integer index
+                self.actions.append(int(action))
 
         if not self.observations:
             raise ValueError(f"No valid (observation, action) pairs in '{data_dir}'")
@@ -114,7 +90,7 @@ class TrajectoryDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         obs = torch.tensor(self.observations[idx], dtype=torch.float32)
-        act = torch.tensor(self.actions[idx], dtype=torch.float32)
+        act = torch.tensor(self.actions[idx], dtype=torch.long)
         return obs, act
 
 
@@ -191,30 +167,28 @@ def collect_auto_trajectories(
             foods = state.get("foods", [])
 
             # Determine target angle based on rules policy
-            target_angle_rad = None
+            target_angle_deg = None
             if nearest_enemy and nearest_enemy["distance"] < DANGER_DISTANCE:
                 fleeing = True
                 # Flee: target is opposite direction from enemy
                 angle_to_enemy_rad = nearest_enemy["angle_to"]
-                target_angle_rad = angle_to_enemy_rad + math.pi  # Opposite direction
+                target_angle_deg = (math.degrees(angle_to_enemy_rad) + 180) % 360
             elif (
                 fleeing and nearest_enemy and nearest_enemy["distance"] < SAFE_DISTANCE
             ):
                 angle_to_enemy_rad = nearest_enemy["angle_to"]
-                target_angle_rad = angle_to_enemy_rad + math.pi
+                target_angle_deg = (math.degrees(angle_to_enemy_rad) + 180) % 360
             else:
                 fleeing = False
                 if foods:
                     # Chase food: target is direction to nearest food
                     nearest_food = foods[0]
-                    target_angle_rad = nearest_food["angle"]
+                    target_angle_deg = math.degrees(nearest_food["angle"]) % 360
 
-            # Compute relative turn action (not absolute angle)
+            # Convert to discrete action index
             action = None
-            if target_angle_rad is not None:
-                action = compute_target_turn_action(snake_angle, target_angle_rad)
-                # Convert to degrees for controller
-                target_angle_deg = math.degrees(target_angle_rad) % 360
+            if target_angle_deg is not None:
+                action = angle_to_discrete_action(target_angle_deg)
                 controller.move_to_angle(target_angle_deg)
 
             if current_length == last_length:
@@ -304,6 +278,8 @@ def train_supervised(
 ) -> str:
     """Train PolicyNetwork by behavior cloning from trajectory data.
 
+    Uses cross-entropy loss for discrete action classification.
+
     Args:
         data_dir: Directory containing trajectory JSON files.
         output_path: Path to save the trained model.
@@ -342,53 +318,56 @@ def train_supervised(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    policy = PolicyNetwork(state_dim, action_dim=1).to(device)
+    policy = PolicyNetwork(state_dim, num_actions=NUM_ACTIONS).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=1e-5)
-    criterion = nn.MSELoss()
+    criterion = nn.CrossEntropyLoss()
 
     def evaluate(loader):
         policy.eval()
-        total_loss, total_mae, total_samples = 0.0, 0.0, 0
+        total_loss, total_correct, total_samples = 0.0, 0, 0
         with torch.no_grad():
             for obs_batch, act_batch in loader:
                 obs_batch = obs_batch.to(device)
-                act_batch = act_batch.to(device).unsqueeze(-1)
-                mean, _ = policy(obs_batch)
-                loss = criterion(mean, act_batch)
+                act_batch = act_batch.to(device)
+                logits = policy(obs_batch)
+                loss = criterion(logits, act_batch)
                 total_loss += loss.item() * obs_batch.size(0)
-                total_mae += torch.abs(mean - act_batch).sum().item()
+                preds = torch.argmax(logits, dim=-1)
+                total_correct += (preds == act_batch).sum().item()
                 total_samples += obs_batch.size(0)
-        return total_loss / max(1, total_samples), total_mae / max(1, total_samples)
+        accuracy = total_correct / max(1, total_samples)
+        return total_loss / max(1, total_samples), accuracy
 
     for epoch in range(1, epochs + 1):
         policy.train()
-        running_loss, running_mae, running_samples = 0.0, 0.0, 0
+        running_loss, running_correct, running_samples = 0.0, 0, 0
 
         for obs_batch, act_batch in train_loader:
             obs_batch = obs_batch.to(device)
-            act_batch = act_batch.to(device).unsqueeze(-1)
+            act_batch = act_batch.to(device)
 
             optimizer.zero_grad()
-            mean, _ = policy(obs_batch)
-            loss = criterion(mean, act_batch)
+            logits = policy(obs_batch)
+            loss = criterion(logits, act_batch)
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item() * obs_batch.size(0)
-            running_mae += torch.abs(mean - act_batch).sum().item()
+            preds = torch.argmax(logits, dim=-1)
+            running_correct += (preds == act_batch).sum().item()
             running_samples += obs_batch.size(0)
 
         train_loss = running_loss / max(1, running_samples)
-        train_mae = running_mae / max(1, running_samples)
+        train_acc = running_correct / max(1, running_samples)
 
         if val_loader:
-            val_loss, val_mae = evaluate(val_loader)
+            val_loss, val_acc = evaluate(val_loader)
             print(
-                f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f}, train_mae={train_mae:.3f}, val_loss={val_loss:.4f}, val_mae={val_mae:.3f}"
+                f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f}, train_acc={train_acc:.3f}, val_loss={val_loss:.4f}, val_acc={val_acc:.3f}"
             )
         else:
             print(
-                f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f}, train_mae={train_mae:.3f}"
+                f"Epoch {epoch}/{epochs} | train_loss={train_loss:.4f}, train_acc={train_acc:.3f}"
             )
 
     models_dir = os.path.dirname(output_path) or "."
@@ -404,7 +383,7 @@ def train_supervised(
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "state_dim": state_dim,
-            "action_dim": 1,
+            "num_actions": NUM_ACTIONS,
         },
     }
 

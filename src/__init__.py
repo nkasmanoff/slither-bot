@@ -22,12 +22,12 @@ from .pretrain import collect_auto_trajectories, train_supervised
 from .profile import Profiler, profile_training_loop, quick_profile_selenium
 from .rules_policy import run_rules_based_policy
 from .utils import (
-    MAX_TURN_RATE,
+    ANGLE_PER_ACTION,
+    NUM_ACTIONS,
     OBSERVATION_DIM,
-    angle_to_continuous_action,
-    apply_turn_to_angle,
-    continuous_action_to_angle,
-    continuous_action_to_turn,
+    angle_rad_to_discrete_action,
+    angle_to_discrete_action,
+    discrete_action_to_angle,
     extract_observation,
     setup_browser,
     start_game,
@@ -67,10 +67,10 @@ __all__ = [
     "start_game",
     "wait_for_game_ready",
     "extract_observation",
-    "angle_to_continuous_action",
-    "continuous_action_to_angle",
-    "continuous_action_to_turn",
-    "apply_turn_to_angle",
+    "discrete_action_to_angle",
+    "angle_to_discrete_action",
+    "angle_rad_to_discrete_action",
     "OBSERVATION_DIM",
-    "MAX_TURN_RATE",
+    "NUM_ACTIONS",
+    "ANGLE_PER_ACTION",
 ]

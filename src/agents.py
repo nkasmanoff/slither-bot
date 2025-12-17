@@ -1,12 +1,12 @@
 """RL Agents for Slither.io.
 
 Contains:
-- PolicyNetwork: Neural network for REINFORCE agent
-- ActorCriticNetwork: Neural network for A2C agent
+- PolicyNetwork: Neural network for REINFORCE agent (discrete actions)
+- ActorCriticNetwork: Neural network for A2C agent (discrete actions)
 - REINFORCEAgent: Vanilla policy gradient (updates at end of episode)
 - A2CAgent: Actor-Critic with N-step updates (updates during episode)
 
-Action Space: Continuous, single value in [-1, 1] mapped to rotation angle [0, 360].
+Action Space: Discrete, 12 actions representing directions at 30° intervals.
 """
 
 import numpy as np
@@ -14,68 +14,63 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.distributions import Normal
+from torch.distributions import Categorical
+
+from .utils import NUM_ACTIONS
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-LOG_STD_MIN = -20
-LOG_STD_MAX = 2
-
 
 class PolicyNetwork(nn.Module):
-    """Neural network policy for continuous action selection.
+    """Neural network policy for discrete action selection.
 
-    Outputs a Gaussian distribution over actions in [-1, 1].
+    Outputs logits over NUM_ACTIONS discrete actions.
     """
 
-    def __init__(self, state_dim, action_dim=1, hidden_dim=64):
+    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=64):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.mean_head = nn.Linear(hidden_dim, 1)
-        self.log_std = nn.Parameter(torch.zeros(1))
+        self.action_head = nn.Linear(hidden_dim, num_actions)
 
     def forward(self, x):
-        """Forward pass returning mean and std for the action distribution."""
+        """Forward pass returning action logits."""
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        mean = torch.tanh(self.mean_head(x))
-        log_std = torch.clamp(self.log_std, LOG_STD_MIN, LOG_STD_MAX)
-        std = torch.exp(log_std)
-        return mean, std
+        logits = self.action_head(x)
+        return logits
 
     def get_action(self, x, deterministic=False):
         """Sample an action from the policy.
 
         Args:
             x: State tensor.
-            deterministic: If True, return mean action without sampling.
+            deterministic: If True, return argmax action without sampling.
 
         Returns:
-            action: Sampled action in [-1, 1].
+            action: Sampled action index (0 to NUM_ACTIONS-1).
             log_prob: Log probability of the action.
-            mean: Mean of the distribution.
-            std: Standard deviation.
+            probs: Action probabilities.
         """
-        mean, std = self.forward(x)
-        dist = Normal(mean, std)
+        logits = self.forward(x)
+        probs = F.softmax(logits, dim=-1)
+        dist = Categorical(probs)
 
         if deterministic:
-            action = mean
+            action = torch.argmax(probs, dim=-1)
         else:
-            action = dist.rsample()
-            action = torch.clamp(action, -1.0, 1.0)
+            action = dist.sample()
 
-        log_prob = dist.log_prob(action).sum(dim=-1)
-        return action, log_prob, mean, std
+        log_prob = dist.log_prob(action)
+        return action, log_prob, probs
 
 
 class ActorCriticNetwork(nn.Module):
-    """Actor-Critic network with shared backbone for continuous actions."""
+    """Actor-Critic network with shared backbone for discrete actions."""
 
-    def __init__(self, state_dim, hidden_dim=64):
+    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=64):
         super().__init__()
         self.shared = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
@@ -89,32 +84,29 @@ class ActorCriticNetwork(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
         )
-        self.mean_head = nn.Linear(hidden_dim, 1)
-        self.log_std = nn.Parameter(torch.zeros(1))
+        self.action_head = nn.Linear(hidden_dim, num_actions)
         self.value_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        """Forward pass returning action distribution params and value."""
+        """Forward pass returning action logits and value."""
         shared = self.shared(x)
-        mean = torch.tanh(self.mean_head(shared))
-        log_std = torch.clamp(self.log_std, LOG_STD_MIN, LOG_STD_MAX)
-        std = torch.exp(log_std)
+        logits = self.action_head(shared)
         value = self.value_head(shared)
-        return mean, std, value
+        return logits, value
 
     def get_action(self, x, deterministic=False):
         """Sample an action from the policy."""
-        mean, std, value = self.forward(x)
-        dist = Normal(mean, std)
+        logits, value = self.forward(x)
+        probs = F.softmax(logits, dim=-1)
+        dist = Categorical(probs)
 
         if deterministic:
-            action = mean
+            action = torch.argmax(probs, dim=-1)
         else:
-            action = dist.rsample()
-            action = torch.clamp(action, -1.0, 1.0)
+            action = dist.sample()
 
-        log_prob = dist.log_prob(action).sum(dim=-1)
-        return action, log_prob, value, mean, std
+        log_prob = dist.log_prob(action)
+        return action, log_prob, value, probs
 
     def get_value(self, x):
         """Get only state value."""
@@ -123,15 +115,16 @@ class ActorCriticNetwork(nn.Module):
 
     def evaluate_actions(self, states, actions):
         """Evaluate log probabilities and entropy for given state-action pairs."""
-        mean, std, values = self.forward(states)
-        dist = Normal(mean, std)
-        log_probs = dist.log_prob(actions).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1).mean()
+        logits, values = self.forward(states)
+        probs = F.softmax(logits, dim=-1)
+        dist = Categorical(probs)
+        log_probs = dist.log_prob(actions)
+        entropy = dist.entropy().mean()
         return log_probs, entropy, values
 
 
 class REINFORCEAgent:
-    """REINFORCE policy gradient agent with continuous actions.
+    """REINFORCE policy gradient agent with discrete actions.
 
     Updates policy only at the end of each episode using full returns.
     """
@@ -146,19 +139,16 @@ class REINFORCEAgent:
     def select_action(self, state, return_probs=False, deterministic=False):
         """Select action using current policy."""
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        action, log_prob, mean, std = self.policy.get_action(
-            state_tensor, deterministic
-        )
+        action, log_prob, probs = self.policy.get_action(state_tensor, deterministic)
         self.saved_log_probs.append(log_prob)
-        action_value = action.squeeze().item()
+        action_idx = action.item()
 
         if return_probs:
-            return action_value, {
-                "mean": mean.squeeze().item(),
-                "std": std.squeeze().item(),
-                "action": action_value,
+            return action_idx, {
+                "probs": probs.squeeze().detach().cpu().numpy().tolist(),
+                "action": action_idx,
             }
-        return action_value
+        return action_idx
 
     def compute_returns(self, rewards):
         """Compute discounted returns."""
@@ -232,7 +222,7 @@ class REINFORCEAgent:
 
 
 class A2CAgent:
-    """Actor-Critic agent with N-step updates for continuous actions.
+    """Actor-Critic agent with N-step updates for discrete actions.
 
     Updates policy every N steps using TD-style advantages, enabling
     learning during long episodes without waiting for episode end.
@@ -271,23 +261,22 @@ class A2CAgent:
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            action, log_prob, value, mean, std = self.network.get_action(
+            action, log_prob, value, probs = self.network.get_action(
                 state_tensor, deterministic
             )
 
-        action_value = action.squeeze().item()
+        action_idx = action.item()
         self.states.append(state)
-        self.actions.append(action_value)
+        self.actions.append(action_idx)
         self.values.append(value.squeeze().item())
         self.log_probs.append(log_prob.item())
 
         if return_probs:
-            return action_value, {
-                "mean": mean.squeeze().item(),
-                "std": std.squeeze().item(),
-                "action": action_value,
+            return action_idx, {
+                "probs": probs.squeeze().detach().cpu().numpy().tolist(),
+                "action": action_idx,
             }
-        return action_value
+        return action_idx
 
     def store_reward(self, reward, done=False):
         """Store reward and done flag from environment step."""
@@ -333,7 +322,7 @@ class A2CAgent:
         returns = [adv + val for adv, val in zip(advantages, self.values)]
 
         states_tensor = torch.FloatTensor(np.array(self.states)).to(device)
-        actions_tensor = torch.FloatTensor(self.actions).unsqueeze(-1).to(device)
+        actions_tensor = torch.LongTensor(self.actions).to(device)
         returns_tensor = torch.FloatTensor(returns).to(device)
         advantages_tensor = torch.FloatTensor(advantages).to(device)
 
@@ -438,9 +427,8 @@ class A2CAgent:
             "shared.2.bias": policy_state["fc2.bias"],
             "shared.4.weight": policy_state["fc3.weight"],
             "shared.4.bias": policy_state["fc3.bias"],
-            "mean_head.weight": policy_state["mean_head.weight"],
-            "mean_head.bias": policy_state["mean_head.bias"],
-            "log_std": policy_state["log_std"],
+            "action_head.weight": policy_state["action_head.weight"],
+            "action_head.bias": policy_state["action_head.bias"],
         }
 
         self.network.load_state_dict(new_state, strict=False)
