@@ -1,6 +1,6 @@
 """Gym environment wrapper for Slither.io with RL training support.
 
-Provides SlitherEnv class and training functions for REINFORCE and A2C algorithms.
+Provides SlitherEnv class and training functions for REINFORCE, A2C, and PPO algorithms.
 """
 
 import json

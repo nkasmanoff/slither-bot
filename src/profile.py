@@ -179,7 +179,6 @@ def profile_training_loop(num_steps=50):
 
     agent = A2CAgent(
         state_dim=env.observation_space.shape[0],
-        action_dim=env.action_space.shape[0],
         n_steps=16,
     )
 

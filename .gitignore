@@ -34,3 +34,8 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Blog
+Noah Blog.md
+
+REFINED_BLOG_POST.md
+BLOG_POST.md

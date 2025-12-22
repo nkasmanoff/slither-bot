@@ -172,52 +172,68 @@ class SlitherController:
         return json_path
 
     def _create_video(self):
-        """Create a video from collected frames with annotations."""
+        """Create screenshots and a GIF from collected frames with annotations."""
         if not self.video_frames or not self.screenshot_folder:
             return None
 
         try:
-            height, width = self.video_frames[0].shape[:2]
-            print(
-                f"Creating video with {len(self.video_frames)} frames at {self.video_fps} FPS"
-            )
+            print(f"Processing {len(self.video_frames)} frames...")
 
-            video_filename = os.path.join(self.screenshot_folder, "gameplay.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            out = cv2.VideoWriter(
-                video_filename, fourcc, self.video_fps, (width, height)
-            )
+            # Create screenshots folder
+            screenshots_folder = os.path.join(self.screenshot_folder, "screenshots")
+            os.makedirs(screenshots_folder, exist_ok=True)
 
-            if not out.isOpened():
-                print(f"Error: Failed to open video writer for {video_filename}")
-                return None
-
+            # Process and save each frame as PNG, collect for GIF
+            pil_images = []
             for i, frame in enumerate(self.video_frames):
                 annotated_frame = self._annotate_frame(frame, i)
-                out.write(annotated_frame)
+
+                # Convert BGR to RGB for PIL
+                frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(frame_rgb)
+
+                # Save screenshot
+                screenshot_path = os.path.join(screenshots_folder, f"frame_{i:04d}.png")
+                pil_img.save(screenshot_path)
+
+                # Collect for GIF
+                pil_images.append(pil_img)
+
                 if (i + 1) % 50 == 0:
                     print(f"  Processed {i + 1}/{len(self.video_frames)} frames...")
 
-            out.release()
+            print(f"Screenshots saved to: {screenshots_folder}")
 
-            if os.path.exists(video_filename):
-                file_size = os.path.getsize(video_filename)
-                print(
-                    f"Video created: {video_filename} ({file_size / 1024 / 1024:.2f} MB)"
+            # Create GIF with 0.5 second delay (500ms)
+            gif_filename = os.path.join(self.screenshot_folder, "gameplay.gif")
+            if pil_images:
+                pil_images[0].save(
+                    gif_filename,
+                    save_all=True,
+                    append_images=pil_images[1:],
+                    duration=500,  # 0.5 seconds between frames
+                    loop=0,  # Loop forever
                 )
-            else:
-                return None
+
+                if os.path.exists(gif_filename):
+                    file_size = os.path.getsize(gif_filename)
+                    print(
+                        f"GIF created: {gif_filename} ({file_size / 1024 / 1024:.2f} MB)"
+                    )
 
             self.video_frames = []
             self.video_annotations = []
-            return video_filename
+            return gif_filename
 
         except Exception as e:
-            print(f"Error creating video: {e}")
+            print(f"Error creating screenshots/GIF: {e}")
+            import traceback
+
+            traceback.print_exc()
             return None
 
     def _annotate_frame(self, frame, frame_idx):
-        """Add annotations to a video frame."""
+        """Add annotations to a video frame with discrete action display."""
         if not self.video_annotations or frame_idx >= len(self.video_annotations):
             return frame
 
@@ -233,20 +249,57 @@ class SlitherController:
         annotated_frame = frame.copy()
         height, width = frame.shape[:2]
 
+        # Constants for discrete actions
+        NUM_ACTIONS = 12
+        ANGLE_PER_ACTION = 360.0 / NUM_ACTIONS  # 30 degrees per action
+
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
+        font_scale = 0.4
         color = (255, 255, 255)
         thickness = 1
-        line_height = 20
+        line_height = 16
         x_offset = 10
-        y_start = 30
+        y_start = 25
         y_pos = y_start
 
+        # Observation feature labels (23 features)
+        obs_labels = [
+            "current_angle",
+            "snake_length",
+            "nearest_food_dist",
+            "food_action",
+            "nearest_prey_dist",
+            "prey_action",
+            "nearest_enemy_dist",
+            "enemy_action",
+            "nearest_enemy_head",
+            "num_foods",
+            "num_preys",
+            "num_enemies",
+            "food_efficiency",
+            "enemy_threat",
+            "danger_front",
+            "danger_right",
+            "danger_back",
+            "danger_left",
+            "enemy_in_front",
+            "enemy_in_right",
+            "enemy_in_left",
+            "last_action_sin",
+            "last_action_cos",
+        ]
+
+        # Calculate overlay height based on content
+        obs = annotation.get("observation")
+        num_obs_lines = len(obs_labels) if obs is not None else 0
+        overlay_height = 80 + num_obs_lines * (line_height - 2)
+
+        # Semi-transparent overlay for text background
         overlay = annotated_frame.copy()
         cv2.rectangle(
             overlay,
-            (x_offset - 5, y_start - 20),
-            (width - 10, y_start + 300),
+            (x_offset - 5, y_start - 15),
+            (220, min(y_start + overlay_height, height - 10)),
             (0, 0, 0),
             -1,
         )
@@ -257,110 +310,92 @@ class SlitherController:
             "Model State:",
             (x_offset, y_pos),
             font,
-            font_scale + 0.2,
+            font_scale + 0.1,
             (0, 255, 255),
-            thickness + 1,
+            thickness,
         )
-        y_pos += line_height + 5
+        y_pos += line_height + 2
 
-        if annotation.get("observation") is not None:
-            obs = annotation["observation"]
-            if isinstance(obs, np.ndarray):
-                obs = obs.tolist()
-            obs_labels = [
-                "Angle",
-                "Length",
-                "Food Dist",
-                "Food Ang",
-                "Prey Dist",
-                "Prey Ang",
-                "Enemy Dist",
-                "Enemy Ang",
-                "Food Cnt",
-                "Prey Cnt",
-                "Enemy Cnt",
-                "Food Q1",
-                "Food Q2",
-                "Food Q3",
-                "Food Q4",
-            ]
+        # Get action and compute angle
+        action_idx = annotation.get("action")
+        action_angle = None
+        if action_idx is not None:
+            action_angle = action_idx * ANGLE_PER_ACTION
             cv2.putText(
                 annotated_frame,
-                "Observation:",
+                f"Action: {action_idx} ({action_angle:.0f} deg)",
                 (x_offset, y_pos),
                 font,
                 font_scale,
-                (200, 200, 200),
+                (0, 255, 0),
+                thickness,
+            )
+            y_pos += line_height
+
+        # Show all observation values
+        if obs is not None:
+            if isinstance(obs, np.ndarray):
+                obs = obs.tolist()
+
+            cv2.putText(
+                annotated_frame,
+                "Observations:",
+                (x_offset, y_pos),
+                font,
+                font_scale,
+                (255, 200, 100),
                 thickness,
             )
             y_pos += line_height
 
             for i, (label, value) in enumerate(zip(obs_labels, obs)):
-                if i < len(obs):
-                    text = f"  {label}: {value:.3f}"
+                if i < len(obs) and y_pos < height - 20:
+                    # Color code: green for positive, red for negative, white for zero
+                    if value > 0.5:
+                        val_color = (100, 255, 100)  # Green
+                    elif value < -0.1:
+                        val_color = (100, 100, 255)  # Red (BGR)
+                    else:
+                        val_color = (200, 200, 200)  # Gray
+
+                    text = f"{label}: {value:.2f}"
                     cv2.putText(
                         annotated_frame,
                         text,
                         (x_offset, y_pos),
                         font,
-                        font_scale,
-                        color,
+                        font_scale - 0.05,
+                        val_color,
                         thickness,
                     )
                     y_pos += line_height - 2
-                    if y_pos > height - 100:
-                        break
 
-        y_pos += 5
+        # Draw direction arrow at center of screen
+        if action_angle is not None:
+            center_x = width // 2
+            center_y = height // 2
+            arrow_length = 60
+            arrow_head_length = 15
 
-        if annotation.get("probabilities") is not None:
-            probs = annotation["probabilities"]
-            if isinstance(probs, dict):
-                mean = probs.get("mean", 0.0)
-                std = probs.get("std", 0.0)
-                action_val = probs.get("action", 0.0)
-                angle = (action_val + 1.0) * 180.0
-                mean_angle = (mean + 1.0) * 180.0
+            # Convert angle to radians (0 degrees = right, counter-clockwise)
+            angle_rad = math.radians(action_angle)
+            end_x = int(center_x + arrow_length * math.cos(angle_rad))
+            end_y = int(
+                center_y - arrow_length * math.sin(angle_rad)
+            )  # Negative because y increases downward
 
-                cv2.putText(
-                    annotated_frame,
-                    "Continuous Action:",
-                    (x_offset, y_pos),
-                    font,
-                    font_scale,
-                    (200, 200, 200),
-                    thickness,
-                )
-                y_pos += line_height
-                cv2.putText(
-                    annotated_frame,
-                    f"  Mean: {mean:.3f} ({mean_angle:.1f} deg)",
-                    (x_offset, y_pos),
-                    font,
-                    font_scale,
-                    color,
-                    thickness,
-                )
-                y_pos += line_height - 2
-                cv2.putText(
-                    annotated_frame,
-                    f"  Std: {std:.3f}",
-                    (x_offset, y_pos),
-                    font,
-                    font_scale,
-                    color,
-                    thickness,
-                )
-                y_pos += line_height - 2
-                cv2.putText(
-                    annotated_frame,
-                    f"  Action: {action_val:.3f} ({angle:.1f} deg)",
-                    (x_offset, y_pos),
-                    font,
-                    font_scale,
-                    (0, 255, 0),
-                    thickness,
-                )
+            # Draw arrow line
+            cv2.arrowedLine(
+                annotated_frame,
+                (center_x, center_y),
+                (end_x, end_y),
+                (0, 255, 0),  # Green arrow
+                3,  # Thickness
+                tipLength=0.3,
+            )
+
+            # Draw center circle
+            cv2.circle(annotated_frame, (center_x, center_y), 5, (0, 255, 0), -1)
 
         return annotated_frame
 

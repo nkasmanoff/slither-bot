@@ -2,8 +2,11 @@
 """Train RL agents on Slither.io.
 
 Examples:
-    # Train with A2C (recommended)
+    # Train with A2C (fast training)
     python train.py --algorithm a2c --episodes 50
+
+    # Train with PPO (recommended for stability)
+    python train.py --algorithm ppo --episodes 50
 
     # Train with REINFORCE
     python train.py --algorithm reinforce --episodes 50

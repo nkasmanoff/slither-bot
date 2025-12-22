@@ -2,9 +2,10 @@
 
 Contains:
 - PolicyNetwork: Neural network for REINFORCE agent (discrete actions)
-- ActorCriticNetwork: Neural network for A2C agent (discrete actions)
+- ActorCriticNetwork: Neural network for A2C and PPO agents (discrete actions)
 - REINFORCEAgent: Vanilla policy gradient (updates at end of episode)
 - A2CAgent: Actor-Critic with N-step updates (updates during episode)
+- PPOAgent: Proximal Policy Optimization with clipped objective (mini-batch updates)
 
 Action Space: Discrete, 12 actions representing directions at 30° intervals.
 """
