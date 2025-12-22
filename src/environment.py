@@ -52,12 +52,13 @@ class SlitherEnv(gym.Env):
         self.previous_length = 0
         self.steps = 0
         self.driver = driver
+        self.last_action = None  # Track last action for observation
 
     def _get_obs(self, state=None):
         """Extract observation from game state."""
         if state is None:
             state = self.controller.get_detailed_state()
-        return extract_observation(state)
+        return extract_observation(state, last_action=self.last_action)
 
     def step(self, action, observation=None, probabilities=None):
         """Execute action and return next state, reward, done, info.
@@ -69,6 +70,9 @@ class SlitherEnv(gym.Env):
         # Convert discrete action to angle in degrees
         angle_deg = discrete_action_to_angle(action)
         self.controller.move_to_angle(angle_deg)
+
+        # Store action for next observation (temporal context)
+        self.last_action = action
 
         if observation is not None or probabilities is not None:
             self.controller.set_frame_annotation(
@@ -92,15 +96,16 @@ class SlitherEnv(gym.Env):
         length_increase = current_length - self.previous_length
 
         # === Reward Shaping ===
+        # NOTE: Rewards scaled down to keep values stable for RL training
         reward = 0.0
 
-        # Reward for eating food (growing) - Increased to prioritize growth
-        reward += length_increase * 30.0
+        # Reward for eating food (growing)
+        reward += length_increase * 1.0
 
-        # Smaller time penalty to encourage longer survival without stagnation
-        reward -= 0.1
+        # Small survival bonus (encourages staying alive)
+        reward += 0.01
 
-        # Danger proximity penalty - refined to be less punishing at distance
+        # Danger proximity penalty - scaled down for stability
         enemies = full_state.get("other_snakes", []) if full_state else []
         if enemies:
             nearest_enemy_dist = enemies[0].get("distance", 1000)
@@ -109,26 +114,20 @@ class SlitherEnv(gym.Env):
             min_danger_dist = min(nearest_enemy_dist, nearest_enemy_head_dist)
 
             if min_danger_dist < 60:  # Critical danger zone
-                reward -= 20.0
-            elif min_danger_dist < 120:  # High danger
-                reward -= 10.0
-            elif min_danger_dist < 200:  # Moderate danger
-                reward -= 2.0
-            elif min_danger_dist < 300:  # Caution zone
                 reward -= 0.5
-
-        # Small reward for staying away from enemies (positive reinforcement)
-        if not enemies or (enemies and enemies[0].get("distance", 1000) > 500):
-            reward += 0.5  # Bonus for being in safe area
+            elif min_danger_dist < 120:  # High danger
+                reward -= 0.2
+            elif min_danger_dist < 200:  # Moderate danger
+                reward -= 0.05
 
         self.previous_length = current_length
         self.steps += 1
 
         if done:
-            # Strong death penalty - dying is very bad!
-            reward -= 100.0
-            # Small consolation for length achieved
-            reward += current_length * 0.25
+            # Death penalty - significant but not overwhelming
+            reward -= 5.0
+            # Small bonus for length achieved (encourages longer survival)
+            reward += current_length * 0.01
 
         info = {
             "length": current_length,
@@ -160,6 +159,7 @@ class SlitherEnv(gym.Env):
 
         self.previous_length = self.controller.get_snake_length()
         self.steps = 0
+        self.last_action = None  # Reset action history for new episode
         return self._get_obs()
 
 
@@ -307,6 +307,7 @@ def train_agent_a2c(
     n_steps=64,
     learning_rate=0.0003,
     action_delay=0.15,
+    entropy_coef=0.05,
 ):
     """Train the A2C agent on Slither.io."""
     driver, env = setup_browser_and_game(
@@ -319,7 +320,7 @@ def train_agent_a2c(
         gae_lambda=0.95,
         n_steps=n_steps,
         value_loss_coef=0.5,
-        entropy_coef=0.01,
+        entropy_coef=entropy_coef,  # Higher entropy prevents policy collapse
     )
 
     if pretrained_model_path and os.path.exists(pretrained_model_path):
@@ -345,13 +346,14 @@ def train_agent_a2c(
     )
 
     print(f"Starting A2C training for {num_episodes} episodes...")
-    print(f"N-step updates every {n_steps} steps")
+    print(f"N-step updates every {n_steps} steps, entropy_coef={entropy_coef}")
 
     for episode in range(num_episodes):
         state = env.reset()
         episode_reward, episode_length, max_length = 0, 0, 0
         recent_lengths = []
         episode_update_losses = []
+        episode_entropies = []
         done = False
 
         while not done:
@@ -375,6 +377,7 @@ def train_agent_a2c(
                     next_state=next_state if not done else None
                 )
                 episode_update_losses.append(loss_info["total_loss"])
+                episode_entropies.append(loss_info.get("entropy", 0.0))
 
             state = next_state
 
@@ -388,6 +391,7 @@ def train_agent_a2c(
         if len(agent.rewards) > 0:
             loss_info = agent.update_policy(next_state=None)
             episode_update_losses.append(loss_info["total_loss"])
+            episode_entropies.append(loss_info.get("entropy", 0.0))
 
         if env.controller.record_video and env.controller.video_frames:
             video_path = env.controller._create_video()
@@ -395,14 +399,17 @@ def train_agent_a2c(
                 print(f"Episode {episode + 1} video saved to: {video_path}")
 
         avg_loss = np.mean(episode_update_losses) if episode_update_losses else 0.0
+        avg_entropy = np.mean(episode_entropies) if episode_entropies else 0.0
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         episode_losses.append(avg_loss)
         episode_max_lengths.append(max_length)
 
+        # Log entropy - if it drops below ~1.0 the policy is collapsing
         print(
-            f"Episode {episode + 1}/{num_episodes} | Steps: {episode_length} | Updates: {len(episode_update_losses)} | Reward: {episode_reward:.2f} | Max Length: {max_length} | Avg Loss: {avg_loss:.4f}"
+            f"Episode {episode + 1}/{num_episodes} | Steps: {episode_length} | Reward: {episode_reward:.2f} | "
+            f"Max Length: {max_length} | Loss: {avg_loss:.2f} | Entropy: {avg_entropy:.3f}"
         )
 
         if max_length > best_length:

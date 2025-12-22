@@ -15,8 +15,8 @@ from selenium.webdriver.chrome.options import Options
 # Environment configuration
 IS_RASPBERRY_PI = os.environ.get("SLITHER_RASPBERRY_PI", "false").lower() == "true"
 
-# Observation dimensions (21 features for discrete action space)
-OBSERVATION_DIM = 21
+# Observation dimensions (23 features: 21 base + 2 for last action sin/cos)
+OBSERVATION_DIM = 23
 
 # Discrete action space: 12 directions at 30° intervals
 NUM_ACTIONS = 12
@@ -94,7 +94,9 @@ def wait_for_game_ready(controller, max_wait: float = 10.0) -> int:
     return controller.get_snake_length()
 
 
-def extract_observation(state: dict | None) -> np.ndarray:
+def extract_observation(
+    state: dict | None, last_action: int | None = None
+) -> np.ndarray:
     """Extract observation vector from game state.
 
     Designed for discrete action space (12 absolute directions).
@@ -102,9 +104,10 @@ def extract_observation(state: dict | None) -> np.ndarray:
 
     Args:
         state: Detailed game state from SlitherController.get_detailed_state().
+        last_action: The previous action taken (0 to NUM_ACTIONS-1), or None if first step.
 
     Returns:
-        21-dimensional observation vector (dtype float32).
+        23-dimensional observation vector (dtype float32).
 
     Observation features:
         0: current_angle - Snake's heading as discrete action index / NUM_ACTIONS
@@ -123,6 +126,7 @@ def extract_observation(state: dict | None) -> np.ndarray:
         13: enemy_threat - Overall threat level from nearby enemies
         14-17: danger_quadrant - Danger level in front/right/back/left
         18-20: closest_enemy_in_front/right/left - Binary danger indicators
+        21-22: last_action_sin/cos - Sin/cos encoding of last action (cyclical)
     """
     if not state or not state.get("snake"):
         return np.zeros(OBSERVATION_DIM, dtype=np.float32)
@@ -249,6 +253,17 @@ def extract_observation(state: dict | None) -> np.ndarray:
         elif 210 <= relative_angle_deg < 300:
             danger_left = 1.0
 
+    # Last action encoding (sin/cos for cyclical representation)
+    # This helps the agent know what it just did for smoother control
+    if last_action is not None:
+        last_action_angle = last_action * (2 * np.pi / NUM_ACTIONS)
+        last_action_sin = np.sin(last_action_angle)
+        last_action_cos = np.cos(last_action_angle)
+    else:
+        # First step: no previous action, use neutral values
+        last_action_sin = 0.0
+        last_action_cos = 1.0  # Points "forward" (action 0)
+
     return np.array(
         [
             current_angle_norm,
@@ -272,6 +287,8 @@ def extract_observation(state: dict | None) -> np.ndarray:
             danger_front,
             danger_right,
             danger_left,
+            last_action_sin,
+            last_action_cos,
         ],
         dtype=np.float32,
     )

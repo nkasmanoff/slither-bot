@@ -2,7 +2,9 @@
 games/
 models/
 inference_logs/
-
+training_logs/
+human_trajectories/
+trajectories/
 # Python
 __pycache__/
 *.py[cod]

@@ -70,6 +70,12 @@ def main():
         default=0.15,
         help="Delay between actions in seconds (default: 0.15)",
     )
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.05,
+        help="Entropy coefficient for exploration (default: 0.05, increase if policy collapses)",
+    )
 
     args = parser.parse_args()
 
@@ -80,6 +86,7 @@ def main():
             pretrained_model_path=args.pretrained,
             n_steps=args.n_steps if args.n_steps != 256 else 64,
             action_delay=args.action_delay,
+            entropy_coef=args.entropy_coef,
         )
     elif args.algorithm == "ppo":
         train_agent_ppo(

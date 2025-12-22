@@ -25,9 +25,10 @@ class PolicyNetwork(nn.Module):
     """Neural network policy for discrete action selection.
 
     Outputs logits over NUM_ACTIONS discrete actions.
+    Architecture: 3 hidden layers × 192 units.
     """
 
-    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=128):
+    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=192):
         super().__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
@@ -68,16 +69,16 @@ class PolicyNetwork(nn.Module):
 
 
 class ActorCriticNetwork(nn.Module):
-    """Actor-Critic network with shared backbone for discrete actions."""
+    """Actor-Critic network with shared backbone for discrete actions.
 
-    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=128):
+    Architecture: 3 hidden layers × 192 units (shallower but wider than before).
+    This reduces sequential latency while maintaining capacity.
+    """
+
+    def __init__(self, state_dim, num_actions=NUM_ACTIONS, hidden_dim=192):
         super().__init__()
         self.shared = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -236,10 +237,10 @@ class A2CAgent:
         gae_lambda=0.95,
         n_steps=64,
         value_loss_coef=0.5,
-        entropy_coef=0.01,
+        entropy_coef=0.05,  # Increased from 0.01 to prevent entropy collapse
         max_grad_norm=0.5,
     ):
-        self.network = ActorCriticNetwork(state_dim, hidden_dim=128).to(device)
+        self.network = ActorCriticNetwork(state_dim, hidden_dim=192).to(device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -334,7 +335,10 @@ class A2CAgent:
         log_probs, entropy, values = self.network.evaluate_actions(
             states_tensor, actions_tensor
         )
-        values = values.squeeze()
+        # Fix shape mismatch: ensure both tensors have same shape
+        values = values.squeeze(-1)  # Remove last dim but keep batch dim
+        if values.dim() == 0:
+            values = values.unsqueeze(0)  # Handle single-element case
         entropy = entropy.mean()
 
         policy_loss = -(log_probs * advantages_tensor).mean()
@@ -458,7 +462,7 @@ class PPOAgent:
         entropy_coef=0.01,
         max_grad_norm=0.5,
     ):
-        self.network = ActorCriticNetwork(state_dim, hidden_dim=128).to(device)
+        self.network = ActorCriticNetwork(state_dim, hidden_dim=192).to(device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
         self.gamma = gamma
         self.gae_lambda = gae_lambda
