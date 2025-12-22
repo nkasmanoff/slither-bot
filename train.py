@@ -17,7 +17,7 @@ Examples:
 
 import argparse
 
-from src.environment import train_agent, train_agent_a2c
+from src.environment import train_agent, train_agent_a2c, train_agent_ppo
 
 
 def main():
@@ -26,7 +26,7 @@ def main():
         "--algorithm",
         type=str,
         default="a2c",
-        choices=["reinforce", "a2c"],
+        choices=["reinforce", "a2c", "ppo"],
         help="RL algorithm to use (default: a2c)",
     )
     parser.add_argument(
@@ -38,8 +38,20 @@ def main():
     parser.add_argument(
         "--n-steps",
         type=int,
+        default=256,
+        help="N-step update interval (default: 256 for PPO, 64 for A2C)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
         default=64,
-        help="N-step update interval for A2C (default: 64)",
+        help="Batch size for PPO updates (default: 64)",
+    )
+    parser.add_argument(
+        "--n-epochs",
+        type=int,
+        default=10,
+        help="Number of optimization epochs per update for PPO (default: 10)",
     )
     parser.add_argument(
         "--pretrained",
@@ -66,7 +78,17 @@ def main():
             num_episodes=args.episodes,
             record_video=args.record_video,
             pretrained_model_path=args.pretrained,
+            n_steps=args.n_steps if args.n_steps != 256 else 64,
+            action_delay=args.action_delay,
+        )
+    elif args.algorithm == "ppo":
+        train_agent_ppo(
+            num_episodes=args.episodes,
+            record_video=args.record_video,
+            pretrained_model_path=args.pretrained,
             n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
             action_delay=args.action_delay,
         )
     else:

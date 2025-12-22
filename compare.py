@@ -19,7 +19,7 @@ def main():
     parser.add_argument(
         "--games",
         type=int,
-        default=3,
+        default=5,
         help="Number of games per setup (default: 3)",
     )
 

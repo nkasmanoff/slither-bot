@@ -12,7 +12,7 @@ import gymnasium as gym
 import numpy as np
 from selenium.webdriver.common.by import By
 
-from .agents import A2CAgent, REINFORCEAgent
+from .agents import A2CAgent, PPOAgent, REINFORCEAgent
 from .controller import SlitherController
 from .utils import (
     NUM_ACTIONS,
@@ -94,13 +94,13 @@ class SlitherEnv(gym.Env):
         # === Reward Shaping ===
         reward = 0.0
 
-        # Reward for eating food (growing)
-        reward += length_increase * 10.0
+        # Reward for eating food (growing) - Increased to prioritize growth
+        reward += length_increase * 30.0
 
-        # Small time penalty (reduced to not overwhelm danger signal)
-        reward -= 1.0
+        # Smaller time penalty to encourage longer survival without stagnation
+        reward -= 0.1
 
-        # Strong danger proximity penalty - key for learning to avoid enemies!
+        # Danger proximity penalty - refined to be less punishing at distance
         enemies = full_state.get("other_snakes", []) if full_state else []
         if enemies:
             nearest_enemy_dist = enemies[0].get("distance", 1000)
@@ -108,14 +108,14 @@ class SlitherEnv(gym.Env):
             # Use the minimum of body and head distance for danger
             min_danger_dist = min(nearest_enemy_dist, nearest_enemy_head_dist)
 
-            if min_danger_dist < 75:  # Critical danger zone
-                reward -= 15.0
-            elif min_danger_dist < 150:  # High danger
-                reward -= 8.0
-            elif min_danger_dist < 250:  # Moderate danger
-                reward -= 3.0
-            elif min_danger_dist < 400:  # Caution zone
-                reward -= 1.0
+            if min_danger_dist < 60:  # Critical danger zone
+                reward -= 20.0
+            elif min_danger_dist < 120:  # High danger
+                reward -= 10.0
+            elif min_danger_dist < 200:  # Moderate danger
+                reward -= 2.0
+            elif min_danger_dist < 300:  # Caution zone
+                reward -= 0.5
 
         # Small reward for staying away from enemies (positive reinforcement)
         if not enemies or (enemies and enemies[0].get("distance", 1000) > 500):
@@ -440,6 +440,149 @@ def train_agent_a2c(
     return agent
 
 
+def train_agent_ppo(
+    num_episodes=100,
+    record_video=False,
+    pretrained_model_path=None,
+    n_steps=256,
+    batch_size=64,
+    n_epochs=10,
+    learning_rate=0.0003,
+    action_delay=0.15,
+):
+    """Train the PPO agent on Slither.io."""
+    driver, env = setup_browser_and_game(
+        record_video=record_video, action_delay=action_delay
+    )
+    agent = PPOAgent(
+        state_dim=env.observation_space.shape[0],
+        learning_rate=learning_rate,
+        gamma=0.99,
+        gae_lambda=0.95,
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        clip_epsilon=0.2,
+        value_loss_coef=0.5,
+        entropy_coef=0.01,
+    )
+
+    if pretrained_model_path and os.path.exists(pretrained_model_path):
+        print(f"Loading pre-trained model from {pretrained_model_path}")
+        agent.load_model(pretrained_model_path)
+    elif pretrained_model_path:
+        print(f"Warning: pretrained_model_path '{pretrained_model_path}' not found")
+
+    models_dir = "models"
+    os.makedirs(models_dir, exist_ok=True)
+
+    best_length = 0
+    best_reward = float("-inf")
+    episode_rewards, episode_lengths, episode_losses, episode_max_lengths = (
+        [],
+        [],
+        [],
+        [],
+    )
+
+    print(f"Starting PPO training for {num_episodes} episodes...")
+    print(f"Updates every {n_steps} steps with {n_epochs} epochs")
+
+    for episode in range(num_episodes):
+        state = env.reset()
+        episode_reward, episode_length, max_length = 0, 0, 0
+        recent_lengths = []
+        episode_update_losses = []
+        done = False
+
+        while not done:
+            action, probs = agent.select_action(state, return_probs=True)
+            next_state, reward, done, info = env.step(
+                action, observation=state, probabilities=probs
+            )
+            agent.store_reward(reward, done=done)
+
+            episode_reward += reward
+            episode_length += 1
+            current_length = info["length"]
+            max_length = max(max_length, current_length)
+
+            recent_lengths.append(current_length)
+            if len(recent_lengths) > STAGNATION_WINDOW_SIZE:
+                recent_lengths.pop(0)
+
+            if agent.should_update():
+                loss_info = agent.update_policy(
+                    next_state=next_state if not done else None
+                )
+                episode_update_losses.append(loss_info["total_loss"])
+
+            state = next_state
+
+            if len(recent_lengths) >= STAGNATION_WINDOW_SIZE:
+                if recent_lengths[-1] - recent_lengths[0] <= STAGNATION_THRESHOLD_SIZE:
+                    done = True
+
+            if episode_length > 1000:
+                done = True
+
+        if len(agent.rewards) > 0:
+            loss_info = agent.update_policy(next_state=None)
+            episode_update_losses.append(loss_info["total_loss"])
+
+        if env.controller.record_video and env.controller.video_frames:
+            video_path = env.controller._create_video()
+            if video_path:
+                print(f"Episode {episode + 1} video saved to: {video_path}")
+
+        avg_loss = np.mean(episode_update_losses) if episode_update_losses else 0.0
+
+        episode_rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+        episode_losses.append(avg_loss)
+        episode_max_lengths.append(max_length)
+
+        print(
+            f"Episode {episode + 1}/{num_episodes} | Steps: {episode_length} | Updates: {len(episode_update_losses)} | Reward: {episode_reward:.2f} | Max Length: {max_length} | Avg Loss: {avg_loss:.4f}"
+        )
+
+        if max_length > best_length:
+            best_length = max_length
+            best_reward = episode_reward
+            agent.save_model(os.path.join(models_dir, "best_model_ppo.pt"))
+            print(f"New best model! Length: {best_length}")
+
+        if episode < num_episodes - 1:
+            print("Restarting browser for next episode...")
+            driver.quit()
+            driver, env = setup_browser_and_game(
+                record_video=record_video, action_delay=action_delay
+            )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    final_model_path = os.path.join(models_dir, f"final_model_ppo_{timestamp}.pt")
+    agent.save_model(final_model_path)
+
+    _save_training_metrics(
+        episode_rewards,
+        episode_lengths,
+        episode_losses,
+        episode_max_lengths,
+        num_episodes,
+        best_length,
+        best_reward,
+        timestamp,
+        "ppo",
+        n_steps=n_steps,
+        batch_size=batch_size,
+        n_epochs=n_epochs,
+        total_updates=agent.total_updates,
+    )
+
+    driver.quit()
+    return agent
+
+
 def _save_training_metrics(
     episode_rewards,
     episode_lengths,
@@ -501,6 +644,10 @@ def load_and_play(
 
     if agent_type.lower() == "a2c":
         agent = A2CAgent(
+            state_dim=env.observation_space.shape[0],
+        )
+    elif agent_type.lower() == "ppo":
+        agent = PPOAgent(
             state_dim=env.observation_space.shape[0],
         )
     else:
