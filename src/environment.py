@@ -217,7 +217,7 @@ def train_agent(
 
     print(f"Starting training for {num_episodes} episodes...")
     print(
-        f"State dim: {env.observation_space.shape[0]}, Action dim: {env.action_space.shape[0]}"
+        f"State dim: {env.observation_space.shape[0]}, Action dim: {env.action_space.n}"
     )
 
     for episode in range(num_episodes):
@@ -270,7 +270,7 @@ def train_agent(
         if max_length > best_length:
             best_length = max_length
             best_reward = episode_reward
-            agent.save_model(os.path.join(models_dir, "best_model.pt"))
+            agent.save_model(os.path.join(models_dir, "best_model_reinforce.pt"))
             print(f"New best model! Length: {best_length}")
 
         if episode < num_episodes - 1:
@@ -281,7 +281,7 @@ def train_agent(
             )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_model_path = os.path.join(models_dir, f"final_model_{timestamp}.pt")
+    final_model_path = os.path.join(models_dir, f"final_model_reinforce_{timestamp}.pt")
     agent.save_model(final_model_path)
 
     _save_training_metrics(
@@ -346,6 +346,9 @@ def train_agent_a2c(
     )
 
     print(f"Starting A2C training for {num_episodes} episodes...")
+    print(
+        f"State dim: {env.observation_space.shape[0]}, Action dim: {env.action_space.n}"
+    )
     print(f"N-step updates every {n_steps} steps, entropy_coef={entropy_coef}")
 
     for episode in range(num_episodes):
@@ -493,6 +496,9 @@ def train_agent_ppo(
     )
 
     print(f"Starting PPO training for {num_episodes} episodes...")
+    print(
+        f"State dim: {env.observation_space.shape[0]}, Action dim: {env.action_space.n}"
+    )
     print(f"Updates every {n_steps} steps with {n_epochs} epochs")
 
     for episode in range(num_episodes):
